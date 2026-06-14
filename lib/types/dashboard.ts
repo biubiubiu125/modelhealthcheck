@@ -15,12 +15,6 @@ export interface AvailabilityStat {
 
 export type AvailabilityStatsMap = Record<string, AvailabilityStat[]>;
 
-export interface GroupInfoSummary {
-  groupName: string;
-  websiteUrl?: string | null;
-  tags: string;
-}
-
 /**
  * 时间线项目（保持原始 ISO 时间，交给客户端格式化）
  */
@@ -36,22 +30,10 @@ export interface ProviderTimeline {
 }
 
 /**
- * 分组后的 Provider 时间线数据
- */
-export interface GroupedProviderTimelines {
-  groupName: string; // 分组键（未分组为 "__ungrouped__"）
-  displayName: string; // 显示名称（未分组为 "未分组"）
-  timelines: ProviderTimeline[];
-  websiteUrl?: string | null; // 网站地址
-  tags: string; // 分组 Tag（英文逗号分隔字符串）
-}
-
-/**
  * Dashboard 完整数据
  */
 export interface DashboardData {
   providerTimelines: ProviderTimeline[];
-  groupInfos: GroupInfoSummary[];
   lastUpdated: string | null;
   total: number;
   pollIntervalLabel: string;

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAvailabilityCacheMetrics, resetAvailabilityCacheMetrics } from "@/lib/database/availability";
 import { getConfigCacheMetrics, resetConfigCacheMetrics } from "@/lib/database/config-loader";
-import { getGroupInfoCacheMetrics, resetGroupInfoCacheMetrics } from "@/lib/database/group-info";
 import { getDashboardCacheMetrics, resetDashboardCacheMetrics } from "@/lib/core/dashboard-data";
 
 export const revalidate = 0;
@@ -19,17 +18,15 @@ function isAuthorized(request: Request): boolean {
 function buildMetricsResponse() {
   const availability = getAvailabilityCacheMetrics();
   const config = getConfigCacheMetrics();
-  const groupInfo = getGroupInfoCacheMetrics();
   const dashboard = getDashboardCacheMetrics();
 
   return NextResponse.json({
     availabilityCache: availability,
     configCache: config,
-    groupInfoCache: groupInfo,
     dashboardCache: dashboard,
     combinedDbCache: {
-      hits: availability.hits + config.hits + groupInfo.hits,
-      misses: availability.misses + config.misses + groupInfo.misses,
+      hits: availability.hits + config.hits,
+      misses: availability.misses + config.misses,
     },
     generatedAt: new Date().toISOString(),
   });
@@ -50,7 +47,6 @@ export async function POST(request: Request) {
 
   resetAvailabilityCacheMetrics();
   resetConfigCacheMetrics();
-  resetGroupInfoCacheMetrics();
   resetDashboardCacheMetrics();
 
   return buildMetricsResponse();

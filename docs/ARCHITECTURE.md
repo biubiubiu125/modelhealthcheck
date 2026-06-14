@@ -6,7 +6,7 @@
 
 Check CX 当前可分为四个运行时层：
 
-1. **Next.js App Router**：提供 Dashboard、分组页、后台管理页与 API 路由。
+1. **Next.js App Router**：提供 Dashboard、后台管理页与 API 路由。
 2. **后台轮询器**：在单个进程内定时执行健康检查与官方状态抓取。
 3. **控制面存储层**：通过 `lib/storage/resolver.ts` 在 Supabase、直连 Postgres、SQLite 之间解析后端。
 4. **聚合与缓存层**：负责历史快照、统计聚合、ETag 与前端缓存。
@@ -20,7 +20,7 @@ check_configs / request_templates / site_settings
             ↓
     可用能力范围内的持久化写入
             ↓
-   聚合快照 / Dashboard API / Group API / Admin UI
+   聚合快照 / Dashboard API / Admin UI
 ```
 
 ## 2. 运行时组件
@@ -28,10 +28,8 @@ check_configs / request_templates / site_settings
 ### 2.1 页面与 API
 
 - `app/page.tsx`：Dashboard 首屏 SSR。
-- `app/group/[groupName]/page.tsx`：分组详情页。
-- `app/admin/**`：后台管理控制面，包括登录、配置、模板、通知、分组、存储诊断、站点设置等。
+- `app/admin/**`：后台管理控制面，包括登录、配置、模板、Telegram 推送、存储诊断、站点设置等。
 - `app/api/dashboard/route.ts`：Dashboard 数据 API（ETag + 缓存）。
-- `app/api/group/[groupName]/route.ts`：分组数据 API。
 - `app/api/v1/status/route.ts`：对外只读状态 API。
 
 ### 2.2 后台轮询器
@@ -60,7 +58,7 @@ check_configs / request_templates / site_settings
 | 能力 | Supabase | Postgres | SQLite |
 |---|---|---|---|
 | 管理员认证 | ✅ | ✅ | ✅ |
-| 检测配置 / 模板 / 分组 / 通知 / 站点设置 | ✅ | ✅ | ✅ |
+| 检测配置 / 模板 / Telegram 推送 / 通知 / 站点设置 | ✅ | ✅ | ✅ |
 | 自动建表（控制面） | ❌ | ✅ | ✅ |
 | 历史快照写入 | ✅ | ✅ | ✅ |
 | 可用性统计 | ✅ | ✅ | ✅ |
@@ -79,7 +77,7 @@ check_configs / request_templates / site_settings
 ### 4.1 配置加载
 
 - `lib/database/config-loader.ts` 从当前活动控制面后端读取 `check_configs`。
-- 请求模板、分组、通知、站点设置等后台数据通过 `lib/admin/data.ts` 汇总。
+- 请求模板、Telegram 推送、通知、站点设置等后台数据通过 `lib/admin/data.ts` 汇总。
 
 ### 4.2 健康检查执行
 
@@ -96,13 +94,13 @@ check_configs / request_templates / site_settings
 ### 4.4 前端聚合与缓存
 
 - `lib/core/health-snapshot-service.ts` 负责统一刷新与快照读取。
-- `lib/core/dashboard-data.ts` / `lib/core/group-data.ts` 生成 Dashboard 与 Group 页面所需聚合结构。
-- `lib/core/frontend-cache.ts` / `group-frontend-cache.ts` 在客户端侧做 SWR 风格缓存。
+- `lib/core/dashboard-data.ts` 生成 Dashboard 所需聚合结构。
+- `lib/core/frontend-cache.ts` 在客户端侧做 SWR 风格缓存。
 
 ## 5. 模块边界
 
 - `app/`：页面、API 路由与后台入口
-- `components/`：Dashboard、分组、后台 UI 组件
+- `components/`：Dashboard、后台 UI 组件
 - `lib/core/`：轮询、聚合、缓存与运行参数解析
 - `lib/providers/`：各 Provider 检查能力与请求验证
 - `lib/storage/`：后端解析、能力矩阵、控制面持久化实现，以及 runtime history / availability 适配层

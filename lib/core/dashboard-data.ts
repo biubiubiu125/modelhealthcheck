@@ -7,13 +7,12 @@
  * - 结合轮询配置与官方状态，生成 DashboardView 所需的完整数据结构
  */
 import {loadProviderConfigsFromDB} from "../database/config-loader";
-import {loadGroupInfos} from "../database/group-info";
 import {getAvailabilityStats} from "../database/availability";
 import {getPollingIntervalLabel, getPollingIntervalMs} from "./polling-config";
 import {ensureOfficialStatusPoller} from "./official-status-poller";
 import {ensureCheckPoller} from "./poller";
 import {buildProviderTimelines, loadSnapshotForScope} from "./health-snapshot-service";
-import type {AvailabilityPeriod, DashboardData, GroupInfoSummary, RefreshMode,} from "../types";
+import type {AvailabilityPeriod, DashboardData, RefreshMode} from "../types";
 
 interface DashboardCacheEntry {
   data?: DashboardData;
@@ -166,18 +165,11 @@ async function loadDashboardDataInternal(options?: {
     }
 
     const generatedAt = Date.now();
-    const groupInfos = await loadGroupInfos();
-    const groupInfoSummaries: GroupInfoSummary[] = groupInfos.map((info) => ({
-      groupName: info.group_name,
-      websiteUrl: info.website_url ?? null,
-      tags: info.tags ?? "",
-    }));
     const configIds = allConfigs.map((config) => config.id);
     const availabilityStats = await getAvailabilityStats(configIds);
 
     const data: DashboardData = {
       providerTimelines,
-      groupInfos: groupInfoSummaries,
       lastUpdated,
       total: providerTimelines.length,
       pollIntervalLabel,

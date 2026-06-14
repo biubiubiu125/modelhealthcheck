@@ -3,50 +3,47 @@
 import type {ReactNode} from "react";
 import Link from "next/link";
 import {usePathname} from "next/navigation";
-import {ArrowRight, BellRing, Boxes, FolderTree, HardDrive, LayoutDashboard, Layers3, Settings2} from "lucide-react";
+import {ArrowRight, BellRing, Boxes, HardDrive, LayoutDashboard, Layers3, Settings2} from "lucide-react";
 
+import {logoutAdminAction} from "@/app/admin/actions";
+import {getAdminPath} from "@/lib/admin/paths";
 import {cn} from "@/lib/utils";
 
 const NAV_ITEMS = [
   {
-    href: "/admin",
+    suffix: "",
     label: "总览",
     icon: LayoutDashboard,
   },
   {
-    href: "/admin/configs",
+    suffix: "configs",
     label: "检测配置",
     icon: Boxes,
   },
   {
-    href: "/admin/templates",
+    suffix: "templates",
     label: "请求模板",
     icon: Layers3,
   },
   {
-    href: "/admin/groups",
-    label: "分组信息",
-    icon: FolderTree,
-  },
-  {
-    href: "/admin/notifications",
-    label: "系统通知",
+    suffix: "notifications",
+    label: "Telegram 推送",
     icon: BellRing,
   },
   {
-    href: "/admin/storage",
+    suffix: "storage",
     label: "存储诊断",
     icon: HardDrive,
   },
   {
-    href: "/admin/settings",
+    suffix: "settings",
     label: "站点设置",
     icon: Settings2,
   },
 ] as const;
 
-function isActivePath(currentPath: string, href: string): boolean {
-  if (href === "/admin") {
+function isActivePath(currentPath: string, href: string, isRoot: boolean): boolean {
+  if (isRoot) {
     return currentPath === href;
   }
 
@@ -58,15 +55,18 @@ export function AdminShell({
   username,
   siteName,
   consoleTitle,
+  adminBasePath = "/admin",
 }: {
   children: ReactNode;
   username?: string;
   siteName: string;
   consoleTitle: string;
+  adminBasePath?: string;
 }) {
   const pathname = usePathname();
+  const loginPath = getAdminPath(adminBasePath, "login");
 
-  if (pathname === "/admin/login") {
+  if (pathname === loginPath) {
     return <>{children}</>;
   }
 
@@ -91,13 +91,14 @@ export function AdminShell({
 
               <nav className="grid gap-2.5" aria-label="Admin navigation">
                 {NAV_ITEMS.map((item) => {
-                  const active = isActivePath(pathname, item.href);
+                  const href = getAdminPath(adminBasePath, item.suffix);
+                  const active = isActivePath(pathname, href, item.suffix === "");
                   const Icon = item.icon;
 
                   return (
                     <Link
-                      key={item.href}
-                      href={item.href}
+                      key={item.suffix || "overview"}
+                      href={href}
                       aria-current={active ? "page" : undefined}
                       className={cn(
                         "group flex items-center gap-3 rounded-[1.45rem] border px-4 py-3.5 text-left transition duration-200",
@@ -145,7 +146,8 @@ export function AdminShell({
                     当前账号
                   </div>
                   <div className="mt-2 text-sm font-medium text-foreground">{username}</div>
-                  <form method="post" action="/admin/logout" className="mt-4">
+                  <form action={logoutAdminAction} className="mt-4">
+                    <input type="hidden" name="returnTo" value={loginPath} />
                     <button
                       type="submit"
                       className="inline-flex items-center gap-2 rounded-full border border-border/40 bg-background/80 px-4 py-2 text-sm text-muted-foreground transition hover:border-cyan-500/30 hover:text-foreground"

@@ -70,7 +70,7 @@ const CAPABILITY_LABELS: Array<{
   {
     id: "controlPlaneCrud",
     label: "控制面 CRUD",
-    enabledDetail: "支持配置、模板、分组、通知等控制面数据写入。",
+    enabledDetail: "支持配置、模板、通知等控制面数据写入。",
     disabledDetail: "当前后端无法管理控制面数据。",
   },
   {
@@ -225,7 +225,7 @@ function getBackendChecks(
     label: "控制面能力",
     status: capabilities.controlPlaneCrud ? "pass" : "fail",
     detail: capabilities.controlPlaneCrud
-      ? "控制面数据（管理员、站点设置、配置、模板、分组、通知）可读写。"
+      ? "控制面数据（管理员、站点设置、配置、模板、通知）可读写。"
       : "当前后端未提供控制面 CRUD 能力。",
   });
 
@@ -263,18 +263,36 @@ async function getRepositoryChecks(storage: ControlPlaneStorage): Promise<Storag
         detail: `已成功读取 ${rows.length} 条请求模板。`,
       };
     }),
-    timedCheck("repo-groups", "分组仓库", async () => {
-      const rows = await storage.groups.list();
-      return {
-        status: "pass",
-        detail: `已成功读取 ${rows.length} 条分组信息。`,
-      };
-    }),
     timedCheck("repo-notifications", "通知仓库", async () => {
       const rows = await storage.notifications.list();
       return {
         status: "pass",
         detail: `已成功读取 ${rows.length} 条系统通知。`,
+      };
+    }),
+    timedCheck("repo-telegram-alert-states", "Telegram 告警状态仓库", async () => {
+      const row = await storage.telegramAlertStates.get("__diagnostic__:__probe__");
+      return {
+        status: "pass",
+        detail: row ? "Telegram 告警状态仓库读取正常。" : "Telegram 告警状态仓库读取正常，当前无诊断探测记录。",
+      };
+    }),
+    timedCheck("repo-telegram-push-config", "Telegram 推送配置仓库", async () => {
+      const row = await storage.telegramPushConfig.getSingleton("global");
+      return {
+        status: row ? "pass" : "warn",
+        detail: row ? `已读取 Telegram 推送配置：${row.project_name}` : "未找到 Telegram 推送配置单例记录。",
+        hint: row ? undefined : "可在 Telegram 推送页保存一次配置，或让自动建表/种子逻辑补齐默认记录。",
+      };
+    }),
+    timedCheck("repo-telegram-push-records", "Telegram 推送记录仓库", async () => {
+      const rows = await storage.telegramPushRecords.list({limit: 1});
+      return {
+        status: "pass",
+        detail:
+          rows.length > 0
+            ? "Telegram 推送记录仓库读取正常，已采样到最近记录。"
+            : "Telegram 推送记录仓库读取正常，当前尚无推送记录。",
       };
     }),
     timedCheck("repo-history", "历史快照仓库", async () => {

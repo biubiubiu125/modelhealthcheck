@@ -19,10 +19,13 @@ import {ADMIN_NOTIFICATION_LEVELS, ADMIN_PROVIDER_TYPES} from "@/lib/admin/data"
 import {invalidateStorageDiagnosticsCache} from "@/lib/admin/storage-diagnostics-cache";
 import {invalidateDashboardCache} from "@/lib/core/dashboard-data";
 import {clearPingCache} from "@/lib/core/global-state";
-import {invalidateGroupDashboardCache} from "@/lib/core/group-data";
 import {invalidateAvailabilityCache} from "@/lib/database/availability";
 import {invalidateConfigCache} from "@/lib/database/config-loader";
-import {invalidateGroupInfoCache} from "@/lib/database/group-info";
+import {
+  retryTelegramPushRecord,
+  saveTelegramPushConfig,
+  sendTelegramPushTestMessage,
+} from "@/lib/notifications/telegram";
 import {invalidateSiteSettingsCache} from "@/lib/site-settings";
 import {
   deleteManagedSiteIconByUrl,
@@ -42,7 +45,11 @@ import {createSupabaseControlPlaneStorage} from "@/lib/storage/supabase";
 import {ensureRuntimeMigrations, invalidateRuntimeMigrationCache} from "@/lib/supabase/runtime-migrations";
 import {normalizeProviderEndpoint} from "@/lib/providers/endpoint-utils";
 import {getErrorMessage, logError} from "@/lib/utils";
-import {DEFAULT_SITE_SETTINGS, SITE_SETTINGS_SINGLETON_KEY} from "@/lib/types/site-settings";
+import {
+  DEFAULT_SITE_SETTINGS,
+  normalizeAdminEntryPath,
+  SITE_SETTINGS_SINGLETON_KEY,
+} from "@/lib/types/site-settings";
 
 type JsonRecord = Record<string, unknown>;
 type ManagedStorageProvider = "supabase" | "postgres";
@@ -101,6 +108,13 @@ async function resolveSiteSettingsPayload(
     admin_console_description: normalizeSettingValue(
       current?.admin_console_description,
       DEFAULT_SITE_SETTINGS.adminConsoleDescription
+    ),
+    admin_entry_path: normalizeAdminEntryPath(
+      current?.admin_entry_path ?? DEFAULT_SITE_SETTINGS.adminEntryPath
+    ),
+    telegram_notification_name: normalizeSettingValue(
+      current?.telegram_notification_name,
+      DEFAULT_SITE_SETTINGS.telegramNotificationName
     ),
   };
 }
@@ -259,13 +273,49 @@ function buildRedirectUrl(
   return `${pathname}?${params.toString()}`;
 }
 
+function getPathnameFromReturnTo(returnTo: string): string {
+  const pathname = returnTo.split("?")[0]?.trim();
+  if (!pathname || !pathname.startsWith("/")) {
+    return "/admin";
+  }
+
+  return pathname.replace(/\/+$/, "") || "/admin";
+}
+
+function getLoginPathFromReturnTo(returnTo: string): string {
+  const pathname = getPathnameFromReturnTo(returnTo);
+  if (pathname === "/admin" || pathname.startsWith("/admin/")) {
+    return "/admin/login";
+  }
+
+  const adminChildSegments = new Set([
+    "configs",
+    "templates",
+    "notifications",
+    "storage",
+    "settings",
+    "supabase",
+  ]);
+  const segments = pathname.split("/").filter(Boolean);
+  const lastSegment = segments.at(-1);
+  const baseSegments = lastSegment && adminChildSegments.has(lastSegment)
+    ? segments.slice(0, -1)
+    : segments;
+  const basePath = baseSegments.length > 0 ? `/${baseSegments.join("/")}` : "/admin";
+
+  return `${basePath}/login`;
+}
+
+function getActionLoginPath(formData: FormData, returnTo: string): string {
+  return getOptionalText(formData, "loginReturnTo") ?? getLoginPathFromReturnTo(returnTo);
+}
+
 function revalidateAdminPaths(returnTo: string): void {
   const basePaths = [
     "/",
     "/admin",
     "/admin/configs",
     "/admin/templates",
-    "/admin/groups",
     "/admin/notifications",
     "/admin/supabase",
     "/admin/settings",
@@ -279,9 +329,7 @@ function revalidateAdminPaths(returnTo: string): void {
 
 function invalidateOperationalCaches(): void {
   invalidateConfigCache();
-  invalidateGroupInfoCache();
   invalidateDashboardCache();
-  invalidateGroupDashboardCache();
   invalidateAvailabilityCache();
   invalidateStorageDiagnosticsCache();
   invalidateSiteSettingsCache();
@@ -327,8 +375,8 @@ async function handleAction(
   successMessage: string,
   operation: () => Promise<void>
 ): Promise<never> {
-  await requireAdminSession();
   const returnTo = getOptionalText(formData, "returnTo") ?? "/admin";
+  await requireAdminSession(getActionLoginPath(formData, returnTo));
 
   try {
     await operation();
@@ -347,16 +395,19 @@ async function handleAction(
 }
 
 export async function bootstrapAdminAction(formData: FormData): Promise<never> {
+  const returnTo = getOptionalText(formData, "returnTo") ?? "/admin/storage";
+  const loginReturnTo = getOptionalText(formData, "loginReturnTo") ?? "/admin/login";
+
   try {
     await verifyTurnstile(formData, "admin_bootstrap");
     await createInitialAdminUser({
       username: getText(formData, "username"),
       password: getPasswordConfirmation(formData),
     });
-    revalidateAdminPaths("/admin");
+    revalidateAdminPaths(returnTo);
     redirect(
       buildRedirectUrl(
-        "/admin/storage",
+        returnTo,
         "success",
         "首个管理员已创建。现在可以保留 SQLite，或继续配置 PostgreSQL / Supabase。"
       )
@@ -367,36 +418,40 @@ export async function bootstrapAdminAction(formData: FormData): Promise<never> {
     }
 
     const message = error instanceof Error ? error.message : getErrorMessage(error);
-    redirect(buildRedirectUrl("/admin/login", "error", message));
+    redirect(buildRedirectUrl(loginReturnTo, "error", message));
   }
 }
 
 export async function loginAdminAction(formData: FormData): Promise<never> {
+  const returnTo = getOptionalText(formData, "returnTo") ?? "/admin";
+  const loginReturnTo = getOptionalText(formData, "loginReturnTo") ?? "/admin/login";
+
   try {
     await verifyTurnstile(formData, "login");
     await authenticateAdminUser({
       username: getText(formData, "username"),
       password: getText(formData, "password"),
     });
-    revalidateAdminPaths("/admin");
-    redirect("/admin");
+    revalidateAdminPaths(returnTo);
+    redirect(returnTo);
   } catch (error) {
     if (isRedirectError(error)) {
       throw error;
     }
 
     const message = error instanceof Error ? error.message : getErrorMessage(error);
-    redirect(buildRedirectUrl("/admin/login", "error", message));
+    redirect(buildRedirectUrl(loginReturnTo, "error", message));
   }
 }
 
-export async function logoutAdminAction(): Promise<never> {
+export async function logoutAdminAction(formData?: FormData): Promise<never> {
+  const returnTo = formData ? getOptionalText(formData, "returnTo") ?? "/admin/login" : "/admin/login";
   await clearAdminSession();
-  redirect(buildRedirectUrl("/admin/login", "success", "已退出登录"));
+  redirect(buildRedirectUrl(returnTo, "success", "已退出登录"));
 }
 
-export async function runSupabaseAutoFixAction(): Promise<never> {
-  await requireAdminSession();
+export async function runSupabaseAutoFixAction(returnTo = "/admin/storage"): Promise<never> {
+  await requireAdminSession(getLoginPathFromReturnTo(returnTo));
 
   try {
     const result = await runSupabaseAutoFix();
@@ -406,8 +461,8 @@ export async function runSupabaseAutoFixAction(): Promise<never> {
         : "当前没有可自动修复的数据库问题";
 
     invalidateOperationalCaches();
-    revalidateAdminPaths("/admin/storage");
-    redirect(buildRedirectUrl("/admin/storage", "success", message));
+    revalidateAdminPaths(returnTo);
+    redirect(buildRedirectUrl(returnTo, "success", message));
   } catch (error) {
     if (isRedirectError(error)) {
       throw error;
@@ -415,7 +470,7 @@ export async function runSupabaseAutoFixAction(): Promise<never> {
 
     logError("admin action failed: runSupabaseAutoFix", error);
     const message = error instanceof Error ? error.message : getErrorMessage(error);
-    redirect(buildRedirectUrl("/admin/storage", "error", message));
+    redirect(buildRedirectUrl(returnTo, "error", message));
   }
 }
 
@@ -542,8 +597,8 @@ export async function activateManagedStorageAction(formData: FormData): Promise<
   });
 }
 
-export async function runSupabaseAutoMigrateAction(): Promise<never> {
-  await requireAdminSession();
+export async function runSupabaseAutoMigrateAction(returnTo = "/admin/storage"): Promise<never> {
+  await requireAdminSession(getLoginPathFromReturnTo(returnTo));
 
   try {
     const result = await ensureRuntimeMigrations({force: true});
@@ -554,14 +609,8 @@ export async function runSupabaseAutoMigrateAction(): Promise<never> {
         : "当前没有待执行的自动迁移";
 
     invalidateOperationalCaches();
-    revalidateAdminPaths("/admin/storage");
-    redirect(
-      buildRedirectUrl(
-        "/admin/storage",
-        result.blockedReason ? "error" : "success",
-        message
-      )
-    );
+    revalidateAdminPaths(returnTo);
+    redirect(buildRedirectUrl(returnTo, result.blockedReason ? "error" : "success", message));
   } catch (error) {
     if (isRedirectError(error)) {
       throw error;
@@ -569,30 +618,26 @@ export async function runSupabaseAutoMigrateAction(): Promise<never> {
 
     logError("admin action failed: runSupabaseAutoMigrate", error);
     const message = error instanceof Error ? error.message : getErrorMessage(error);
-    redirect(buildRedirectUrl("/admin/storage", "error", message));
+    redirect(buildRedirectUrl(returnTo, "error", message));
   }
 }
 
 export async function upsertSiteSettingsAction(formData: FormData): Promise<never> {
-  return handleAction(formData, "upsertSiteSettings", "站点设置已保存", async () => {
+  const fallbackReturnTo = getOptionalText(formData, "returnTo") ?? "/admin/settings";
+  await requireAdminSession(getActionLoginPath(formData, fallbackReturnTo));
+  let successReturnTo = fallbackReturnTo;
+
+  try {
     const siteName = getText(formData, "site_name");
     const siteDescription = getText(formData, "site_description");
-    const heroBadge = getText(formData, "hero_badge");
-    const heroTitlePrimary = getText(formData, "hero_title_primary");
-    const heroTitleSecondary = getText(formData, "hero_title_secondary");
-    const heroDescription = getText(formData, "hero_description");
-    const footerBrand = getText(formData, "footer_brand");
     const adminConsoleTitle = getText(formData, "admin_console_title");
     const adminConsoleDescription = getText(formData, "admin_console_description");
+    const adminEntryPath = normalizeAdminEntryPath(getText(formData, "admin_entry_path"));
+    successReturnTo = `${adminEntryPath}/settings`;
 
     if (
       !siteName ||
       !siteDescription ||
-      !heroBadge ||
-      !heroTitlePrimary ||
-      !heroTitleSecondary ||
-      !heroDescription ||
-      !footerBrand ||
       !adminConsoleTitle ||
       !adminConsoleDescription
     ) {
@@ -605,15 +650,25 @@ export async function upsertSiteSettingsAction(formData: FormData): Promise<neve
       ...currentSettings,
       site_name: siteName,
       site_description: siteDescription,
-      hero_badge: heroBadge,
-      hero_title_primary: heroTitlePrimary,
-      hero_title_secondary: heroTitleSecondary,
-      hero_description: heroDescription,
-      footer_brand: footerBrand,
+      footer_brand: siteName,
       admin_console_title: adminConsoleTitle,
       admin_console_description: adminConsoleDescription,
+      admin_entry_path: adminEntryPath,
+      telegram_notification_name: currentSettings.telegram_notification_name,
     });
-  });
+
+    invalidateOperationalCaches();
+    revalidateAdminPaths(successReturnTo);
+    redirect(buildRedirectUrl(successReturnTo, "success", "站点设置已保存"));
+  } catch (error) {
+    if (isRedirectError(error)) {
+      throw error;
+    }
+
+    logError("admin action failed: upsertSiteSettings", error);
+    const message = error instanceof Error ? error.message : getErrorMessage(error);
+    redirect(buildRedirectUrl(fallbackReturnTo, "error", message));
+  }
 }
 
 export async function uploadSiteIconAction(formData: FormData): Promise<never> {
@@ -648,6 +703,37 @@ export async function resetSiteIconAction(formData: FormData): Promise<never> {
     });
 
     await deleteManagedSiteIconByUrl(currentSettings.site_icon_url);
+  });
+}
+
+export async function saveTelegramPushConfigAction(formData: FormData): Promise<never> {
+  return handleAction(formData, "saveTelegramPushConfig", "Telegram 推送配置已保存", async () => {
+    await saveTelegramPushConfig({
+      projectName: getText(formData, "project_name"),
+      botToken: getText(formData, "bot_token"),
+      chatId: getText(formData, "chat_id"),
+      autoPushEnabled: getBoolean(formData, "auto_push_enabled"),
+    });
+  });
+}
+
+export async function sendTelegramPushTestAction(formData: FormData): Promise<never> {
+  return handleAction(formData, "sendTelegramPushTest", "Telegram 测试推送已发送", async () => {
+    await sendTelegramPushTestMessage(getText(formData, "test_message"));
+  });
+}
+
+export async function retryTelegramPushRecordAction(formData: FormData): Promise<never> {
+  return handleAction(formData, "retryTelegramPushRecord", "Telegram 推送记录已重试", async () => {
+    const id = getText(formData, "id");
+    if (!id) {
+      throw new Error("缺少推送记录 ID");
+    }
+
+    const record = await retryTelegramPushRecord(id);
+    if (record.status !== "sent") {
+      throw new Error(record.failure_reason || "Telegram 推送重试失败");
+    }
   });
 }
 
@@ -686,7 +772,7 @@ export async function upsertConfigAction(formData: FormData): Promise<never> {
       enabled: getBoolean(formData, "enabled"),
       is_maintenance: getBoolean(formData, "is_maintenance"),
       template_id: getOptionalText(formData, "template_id"),
-      group_name: getOptionalText(formData, "group_name"),
+      group_name: null,
       request_header: parseJsonRecord(formData, "request_header", "请求头覆盖"),
       metadata: parseJsonRecord(formData, "metadata", "附加参数"),
     };
@@ -704,12 +790,17 @@ export async function upsertConfigAction(formData: FormData): Promise<never> {
       return;
     }
 
+    const editableConfig = existingConfig;
+    if (!editableConfig) {
+      throw new Error("未找到要更新的检测配置");
+    }
+
     if (models.length === 1) {
       await storage.checkConfigs.upsert({id, ...payload, model: models[0]});
       return;
     }
 
-    const baseName = stripGeneratedModelSuffix(name, existingConfig.model);
+    const baseName = stripGeneratedModelSuffix(name, editableConfig.model);
     const [primaryModel, ...extraModels] = models;
 
     await storage.checkConfigs.upsert({
@@ -816,37 +907,6 @@ export async function deleteTemplateAction(formData: FormData): Promise<never> {
 
     const storage = await getControlPlaneStorage();
     await storage.requestTemplates.delete(id);
-  });
-}
-
-export async function upsertGroupAction(formData: FormData): Promise<never> {
-  return handleAction(formData, "upsertGroup", "分组信息已保存", async () => {
-    const id = getOptionalText(formData, "id");
-    const groupName = getText(formData, "group_name");
-    if (!groupName) {
-      throw new Error("分组名称不能为空");
-    }
-
-    const payload = {
-      group_name: groupName,
-      website_url: getOptionalText(formData, "website_url"),
-      tags: getOptionalText(formData, "tags"),
-    };
-
-    const storage = await getControlPlaneStorage();
-    await storage.groups.upsert({id, ...payload});
-  });
-}
-
-export async function deleteGroupAction(formData: FormData): Promise<never> {
-  return handleAction(formData, "deleteGroup", "分组信息已删除", async () => {
-    const id = getText(formData, "id");
-    if (!id) {
-      throw new Error("缺少分组 ID");
-    }
-
-    const storage = await getControlPlaneStorage();
-    await storage.groups.delete(id);
   });
 }
 

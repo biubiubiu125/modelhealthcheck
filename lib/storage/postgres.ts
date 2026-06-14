@@ -8,28 +8,35 @@ import {
   createStorageId,
   getDefaultRequestTemplateRows,
   getDefaultSiteSettingsRow,
+  getDefaultTelegramPushConfigRow,
   mapAdminUserRecord,
   mapAvailabilityStatsRow,
   mapCheckConfigRow,
-  mapGroupInfoRow,
   mapHistorySnapshotRow,
   mapNotificationRow,
   mapRequestTemplateRow,
   mapSiteSettingsRow,
+  mapTelegramAlertStateRow,
+  mapTelegramPushConfigRow,
+  mapTelegramPushRecordRow,
   nowIso,
   POSTGRES_CONTROL_PLANE_SCHEMA_STATEMENTS,
   POSTGRES_RUNTIME_SCHEMA_STATEMENTS,
   serializeJson,
 } from "./shared";
+import {resolvePostgresSsl} from "./postgres-ssl";
 import type {
   CheckConfigMutationInput,
   ControlPlaneStorage,
-  GroupMutationInput,
   NotificationMutationInput,
   RequestTemplateMutationInput,
   RuntimeHistoryQueryOptions,
   SiteSettingsMutationInput,
   StorageCapabilities,
+  TelegramAlertStateMutationInput,
+  TelegramPushConfigMutationInput,
+  TelegramPushRecordMutationInput,
+  TelegramPushRecordStatusUpdateInput,
 } from "./types";
 
 const capabilities: StorageCapabilities = {
@@ -38,7 +45,6 @@ const capabilities: StorageCapabilities = {
   siteSettings: true,
   controlPlaneCrud: true,
   requestTemplates: true,
-  groups: true,
   notifications: true,
   historySnapshots: true,
   availabilityStats: true,
@@ -68,19 +74,15 @@ export async function resetPostgresControlPlaneStorageCache(): Promise<void> {
   }
 }
 
-function isLocalHost(hostname: string): boolean {
-  return ["localhost", "127.0.0.1"].includes(hostname);
-}
-
 function getPool(connectionString: string): Pool {
   if (poolCache?.connectionString === connectionString) {
     return poolCache.pool;
   }
 
-  const url = new URL(connectionString);
+  const ssl = resolvePostgresSsl(connectionString);
   const pool = new Pool({
     connectionString,
-    ssl: isLocalHost(url.hostname) ? false : {rejectUnauthorized: false},
+    ssl: ssl.ssl,
   });
   poolCache = {
     connectionString,
@@ -136,6 +138,18 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
       }
 
       await ensureColumnExists(pool, "site_settings", "site_icon_url", "text NOT NULL DEFAULT '/favicon.png'");
+      await ensureColumnExists(pool, "site_settings", "admin_entry_path", "text NOT NULL DEFAULT '/admin'");
+      await ensureColumnExists(
+        pool,
+        "site_settings",
+        "telegram_notification_name",
+        "text NOT NULL DEFAULT 'RKAPI模型监控'"
+      );
+      await ensureColumnExists(pool, "telegram_push_records", "notification_key", "text");
+      await ensureColumnExists(pool, "telegram_push_records", "event_type", "text");
+      await pool.query(
+        `CREATE INDEX IF NOT EXISTS idx_telegram_push_records_notification_key ON telegram_push_records (notification_key)`
+      );
 
       const defaults = getDefaultSiteSettingsRow();
       await pool.query(
@@ -152,10 +166,12 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
             footer_brand,
             admin_console_title,
             admin_console_description,
+            admin_entry_path,
+            telegram_notification_name,
             created_at,
             updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
           ON CONFLICT (singleton_key) DO NOTHING
         `,
         [
@@ -170,8 +186,36 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
           defaults.footer_brand,
           defaults.admin_console_title,
           defaults.admin_console_description,
+          defaults.admin_entry_path,
+          defaults.telegram_notification_name,
           defaults.created_at,
           defaults.updated_at,
+        ]
+      );
+
+      const telegramDefaults = getDefaultTelegramPushConfigRow();
+      await pool.query(
+        `
+          INSERT INTO telegram_push_config (
+            singleton_key,
+            project_name,
+            bot_token,
+            chat_id,
+            auto_push_enabled,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+          ON CONFLICT (singleton_key) DO NOTHING
+        `,
+        [
+          telegramDefaults.singleton_key,
+          telegramDefaults.project_name,
+          telegramDefaults.bot_token,
+          telegramDefaults.chat_id,
+          telegramDefaults.auto_push_enabled,
+          telegramDefaults.created_at,
+          telegramDefaults.updated_at,
         ]
       );
 
@@ -618,7 +662,8 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
             `
               SELECT singleton_key, site_name, site_description, site_icon_url, hero_badge, hero_title_primary,
                      hero_title_secondary, hero_description, footer_brand,
-                     admin_console_title, admin_console_description, created_at, updated_at
+                     admin_console_title, admin_console_description, admin_entry_path,
+                     telegram_notification_name, created_at, updated_at
               FROM site_settings
               WHERE singleton_key = $1
               LIMIT 1
@@ -650,10 +695,12 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
                 footer_brand,
                 admin_console_title,
                 admin_console_description,
+                admin_entry_path,
+                telegram_notification_name,
                 created_at,
                 updated_at
               )
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
               ON CONFLICT (singleton_key)
               DO UPDATE SET
                 site_name = EXCLUDED.site_name,
@@ -666,6 +713,8 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
                 footer_brand = EXCLUDED.footer_brand,
                 admin_console_title = EXCLUDED.admin_console_title,
                 admin_console_description = EXCLUDED.admin_console_description,
+                admin_entry_path = EXCLUDED.admin_entry_path,
+                telegram_notification_name = EXCLUDED.telegram_notification_name,
                 updated_at = EXCLUDED.updated_at
             `,
             [
@@ -680,6 +729,8 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
               input.footer_brand,
               input.admin_console_title,
               input.admin_console_description,
+              input.admin_entry_path,
+              input.telegram_notification_name,
               timestamp,
               timestamp,
             ]
@@ -897,92 +948,6 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
         }
       },
     },
-    groups: {
-      async list() {
-        await ensureReady();
-        try {
-          const result = await pool.query(
-            `
-              SELECT id, group_name, website_url, tags, created_at, updated_at
-              FROM group_info
-              ORDER BY group_name ASC
-            `
-          );
-
-          return mapRows(result.rows).map(mapGroupInfoRow);
-        } catch (error) {
-          wrapError("读取分组信息", error);
-        }
-      },
-      async getByName(groupName) {
-        await ensureReady();
-        try {
-          const result = await pool.query(
-            `
-              SELECT id, group_name, website_url, tags, created_at, updated_at
-              FROM group_info
-              WHERE group_name = $1
-              LIMIT 1
-            `,
-            [groupName]
-          );
-
-          return result.rows[0] ? mapGroupInfoRow(result.rows[0]) : null;
-        } catch (error) {
-          wrapError("读取分组信息", error);
-        }
-      },
-      async upsert(input: GroupMutationInput) {
-        await ensureReady();
-        const timestamp = nowIso();
-        const payloadId = input.id ?? createStorageId();
-
-        try {
-          if (input.id) {
-            const updateResult = await pool.query(
-              `
-                UPDATE group_info
-                SET group_name = $2,
-                    website_url = $3,
-                    tags = $4,
-                    updated_at = $5
-                WHERE id = $1
-              `,
-              [input.id, input.group_name, input.website_url ?? null, input.tags ?? null, timestamp]
-            );
-
-            if ((updateResult.rowCount ?? 0) > 0) {
-              return;
-            }
-          }
-
-          await pool.query(
-            `
-              INSERT INTO group_info (
-                id,
-                group_name,
-                website_url,
-                tags,
-                created_at,
-                updated_at
-              )
-              VALUES ($1, $2, $3, $4, $5, $6)
-            `,
-            [payloadId, input.group_name, input.website_url ?? null, input.tags ?? null, timestamp, timestamp]
-          );
-        } catch (error) {
-          wrapError("保存分组信息", error);
-        }
-      },
-      async delete(id) {
-        await ensureReady();
-        try {
-          await pool.query(`DELETE FROM group_info WHERE id = $1`, [id]);
-        } catch (error) {
-          wrapError("删除分组信息", error);
-        }
-      },
-    },
     notifications: {
       async list() {
         await ensureReady();
@@ -1063,6 +1028,374 @@ export function createPostgresControlPlaneStorage(connectionString: string): Con
           await pool.query(`DELETE FROM system_notifications WHERE id = $1`, [id]);
         } catch (error) {
           wrapError("删除系统通知", error);
+        }
+      },
+    },
+    telegramAlertStates: {
+      async list(input) {
+        await ensureReady();
+        const limit = input?.limit === null ? null : Math.min(Math.max(input?.limit ?? 100, 1), 500);
+        const limitClause = limit === null ? "" : "LIMIT $1";
+        const params = limit === null ? [] : [limit];
+
+        try {
+          const result = await pool.query(
+            `
+              SELECT notification_key, config_id, model, state, failure_count, success_count,
+                     last_status, last_message, failure_started_at, last_failure_at,
+                     last_success_at, last_notified_at, created_at, updated_at
+              FROM telegram_alert_states
+              ORDER BY updated_at DESC, notification_key ASC
+              ${limitClause}
+            `,
+            params
+          );
+
+          return mapRows(result.rows).map(mapTelegramAlertStateRow);
+        } catch (error) {
+          wrapError("读取 Telegram 告警状态列表", error);
+        }
+      },
+      async get(notificationKey) {
+        await ensureReady();
+        try {
+          const result = await pool.query(
+            `
+              SELECT notification_key, config_id, model, state, failure_count, success_count,
+                     last_status, last_message, failure_started_at, last_failure_at,
+                     last_success_at, last_notified_at, created_at, updated_at
+              FROM telegram_alert_states
+              WHERE notification_key = $1
+              LIMIT 1
+            `,
+            [notificationKey]
+          );
+
+          return result.rows[0] ? mapTelegramAlertStateRow(result.rows[0]) : null;
+        } catch (error) {
+          wrapError("读取 Telegram 告警状态", error);
+        }
+      },
+      async upsert(input: TelegramAlertStateMutationInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+
+        try {
+          const result = await pool.query(
+            `
+              INSERT INTO telegram_alert_states (
+                notification_key,
+                config_id,
+                model,
+                state,
+                failure_count,
+                success_count,
+                last_status,
+                last_message,
+                failure_started_at,
+                last_failure_at,
+                last_success_at,
+                last_notified_at,
+                created_at,
+                updated_at
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+              ON CONFLICT (notification_key)
+              DO UPDATE SET
+                config_id = EXCLUDED.config_id,
+                model = EXCLUDED.model,
+                state = EXCLUDED.state,
+                failure_count = EXCLUDED.failure_count,
+                success_count = EXCLUDED.success_count,
+                last_status = EXCLUDED.last_status,
+                last_message = EXCLUDED.last_message,
+                failure_started_at = EXCLUDED.failure_started_at,
+                last_failure_at = EXCLUDED.last_failure_at,
+                last_success_at = EXCLUDED.last_success_at,
+                last_notified_at = EXCLUDED.last_notified_at,
+                updated_at = EXCLUDED.updated_at
+              RETURNING notification_key, config_id, model, state, failure_count, success_count,
+                        last_status, last_message, failure_started_at, last_failure_at,
+                        last_success_at, last_notified_at, created_at, updated_at
+            `,
+            [
+              input.notification_key,
+              input.config_id,
+              input.model,
+              input.state,
+              input.failure_count,
+              input.success_count,
+              input.last_status ?? null,
+              input.last_message ?? null,
+              input.failure_started_at ?? null,
+              input.last_failure_at ?? null,
+              input.last_success_at ?? null,
+              input.last_notified_at ?? null,
+              timestamp,
+              timestamp,
+            ]
+          );
+
+          return mapTelegramAlertStateRow(result.rows[0]);
+        } catch (error) {
+          wrapError("保存 Telegram 告警状态", error);
+        }
+      },
+      async delete(notificationKey) {
+        await ensureReady();
+        try {
+          await pool.query(`DELETE FROM telegram_alert_states WHERE notification_key = $1`, [
+            notificationKey,
+          ]);
+        } catch (error) {
+          wrapError("删除 Telegram 告警状态", error);
+        }
+      },
+    },
+    telegramPushConfig: {
+      async getSingleton(singletonKey) {
+        await ensureReady();
+        try {
+          const result = await pool.query(
+            `
+              SELECT singleton_key, project_name, bot_token, chat_id, auto_push_enabled,
+                     created_at, updated_at
+              FROM telegram_push_config
+              WHERE singleton_key = $1
+              LIMIT 1
+            `,
+            [singletonKey]
+          );
+
+          return result.rows[0] ? mapTelegramPushConfigRow(result.rows[0]) : null;
+        } catch (error) {
+          wrapError("读取 Telegram 推送配置", error);
+        }
+      },
+      async upsert(input: TelegramPushConfigMutationInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+
+        try {
+          const result = await pool.query(
+            `
+              INSERT INTO telegram_push_config (
+                singleton_key,
+                project_name,
+                bot_token,
+                chat_id,
+                auto_push_enabled,
+                created_at,
+                updated_at
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7)
+              ON CONFLICT (singleton_key)
+              DO UPDATE SET
+                project_name = EXCLUDED.project_name,
+                bot_token = EXCLUDED.bot_token,
+                chat_id = EXCLUDED.chat_id,
+                auto_push_enabled = EXCLUDED.auto_push_enabled,
+                updated_at = EXCLUDED.updated_at
+              RETURNING singleton_key, project_name, bot_token, chat_id, auto_push_enabled,
+                        created_at, updated_at
+            `,
+            [
+              input.singleton_key,
+              input.project_name,
+              input.bot_token,
+              input.chat_id,
+              input.auto_push_enabled,
+              timestamp,
+              timestamp,
+            ]
+          );
+
+          return mapTelegramPushConfigRow(result.rows[0]);
+        } catch (error) {
+          wrapError("保存 Telegram 推送配置", error);
+        }
+      },
+    },
+    telegramPushRecords: {
+      async list(input) {
+        await ensureReady();
+        const limit = input?.limit === null ? null : Math.min(Math.max(input?.limit ?? 100, 1), 500);
+        const limitClause = limit === null ? "" : "LIMIT $1";
+        const params = limit === null ? [] : [limit];
+
+        try {
+          const result = await pool.query(
+            `
+              SELECT id, project_name, title, content, chat_id, status, push_count,
+                     notification_key, event_type, failure_reason, last_pushed_at,
+                     created_at, updated_at
+              FROM telegram_push_records
+              ORDER BY created_at DESC
+              ${limitClause}
+            `,
+            params
+          );
+
+          return mapRows(result.rows).map(mapTelegramPushRecordRow);
+        } catch (error) {
+          wrapError("读取 Telegram 推送记录", error);
+        }
+      },
+      async getById(id) {
+        await ensureReady();
+        try {
+          const result = await pool.query(
+            `
+              SELECT id, project_name, title, content, chat_id, status, push_count,
+                     notification_key, event_type, failure_reason, last_pushed_at,
+                     created_at, updated_at
+              FROM telegram_push_records
+              WHERE id = $1
+              LIMIT 1
+            `,
+            [id]
+          );
+
+          return result.rows[0] ? mapTelegramPushRecordRow(result.rows[0]) : null;
+        } catch (error) {
+          wrapError("读取 Telegram 推送记录详情", error);
+        }
+      },
+      async findLatestByContext(input) {
+        await ensureReady();
+        const isTestEvent = input.eventType === "test";
+        const whereClause = isTestEvent
+          ? "event_type = $1"
+          : "notification_key = $1 AND event_type = $2";
+        const params = isTestEvent ? [input.eventType] : [input.notificationKey ?? "", input.eventType];
+
+        try {
+          const result = await pool.query(
+            `
+              SELECT id, project_name, title, content, chat_id, status, push_count,
+                     notification_key, event_type, failure_reason, last_pushed_at,
+                     created_at, updated_at
+              FROM telegram_push_records
+              WHERE ${whereClause}
+              ORDER BY created_at DESC
+              LIMIT 1
+            `,
+            params
+          );
+
+          return result.rows[0] ? mapTelegramPushRecordRow(result.rows[0]) : null;
+        } catch (error) {
+          wrapError("读取最新 Telegram 推送记录", error);
+        }
+      },
+      async create(input: TelegramPushRecordMutationInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+        const payloadId = input.id ?? createStorageId();
+
+        try {
+          const result = await pool.query(
+            `
+              INSERT INTO telegram_push_records (
+                id,
+                project_name,
+                title,
+                content,
+                chat_id,
+                notification_key,
+                event_type,
+                status,
+                push_count,
+                failure_reason,
+                last_pushed_at,
+                created_at,
+                updated_at
+              )
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+              ON CONFLICT (id)
+              DO UPDATE SET
+                project_name = EXCLUDED.project_name,
+                title = EXCLUDED.title,
+                content = EXCLUDED.content,
+                chat_id = EXCLUDED.chat_id,
+                notification_key = EXCLUDED.notification_key,
+                event_type = EXCLUDED.event_type,
+                status = EXCLUDED.status,
+                push_count = EXCLUDED.push_count,
+                failure_reason = EXCLUDED.failure_reason,
+                last_pushed_at = EXCLUDED.last_pushed_at,
+                updated_at = EXCLUDED.updated_at
+              RETURNING id, project_name, title, content, chat_id, notification_key,
+                        event_type, status, push_count, failure_reason, last_pushed_at,
+                        created_at, updated_at
+            `,
+            [
+              payloadId,
+              input.project_name,
+              input.title,
+              input.content,
+              input.chat_id ?? null,
+              input.notification_key ?? null,
+              input.event_type ?? null,
+              input.status ?? "pending",
+              input.push_count ?? 0,
+              input.failure_reason ?? null,
+              input.last_pushed_at ?? null,
+              timestamp,
+              timestamp,
+            ]
+          );
+
+          return mapTelegramPushRecordRow(result.rows[0]);
+        } catch (error) {
+          wrapError("创建 Telegram 推送记录", error);
+        }
+      },
+      async updateStatus(input: TelegramPushRecordStatusUpdateInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+
+        try {
+          const result = await pool.query(
+            `
+              UPDATE telegram_push_records
+              SET status = $2,
+                  push_count = $3,
+                  failure_reason = $4,
+                  last_pushed_at = $5,
+                  chat_id = COALESCE($6, chat_id),
+                  updated_at = $7
+              WHERE id = $1
+              RETURNING id, project_name, title, content, chat_id, status, push_count,
+                        notification_key, event_type, failure_reason, last_pushed_at,
+                        created_at, updated_at
+            `,
+            [
+              input.id,
+              input.status,
+              input.push_count,
+              input.failure_reason ?? null,
+              input.last_pushed_at ?? null,
+              input.chat_id ?? null,
+              timestamp,
+            ]
+          );
+
+          if (!result.rows[0]) {
+            throw new Error("推送记录不存在或已被删除");
+          }
+
+          return mapTelegramPushRecordRow(result.rows[0]);
+        } catch (error) {
+          wrapError("更新 Telegram 推送记录", error);
+        }
+      },
+      async delete(id) {
+        await ensureReady();
+        try {
+          await pool.query(`DELETE FROM telegram_push_records WHERE id = $1`, [id]);
+        } catch (error) {
+          wrapError("删除 Telegram 推送记录", error);
         }
       },
     },

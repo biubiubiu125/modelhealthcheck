@@ -287,10 +287,10 @@ export async function getAdminSession(): Promise<AdminSession | null> {
   return deserializeSession(sessionCookie);
 }
 
-export async function requireAdminSession(): Promise<AdminSession> {
+export async function requireAdminSession(loginPath = "/admin/login"): Promise<AdminSession> {
   const session = await getAdminSession();
   if (!session) {
-    redirect("/admin/login");
+    redirect(loginPath);
   }
 
   return session;
@@ -366,10 +366,10 @@ export async function authenticateAdminUser(input: {
   return session;
 }
 
-export async function ensureLoggedOutForLoginPage(): Promise<void> {
+export async function ensureLoggedOutForLoginPage(returnTo = "/admin"): Promise<void> {
   const session = await getAdminSession();
   if (session) {
-    redirect("/admin");
+    redirect(returnTo);
   }
 }
 

@@ -11,6 +11,7 @@ import {clearPingCache} from "./global-state";
 import {getCheckConcurrency, getPollingIntervalMs} from "./polling-config";
 import {getLastPingStartedAt, getPollerTimer, setLastPingStartedAt, setPollerTimer,} from "./global-state";
 import {startOfficialStatusPoller} from "./official-status-poller";
+import {notifyTelegramForCheckResults} from "@/lib/notifications/telegram";
 import type {CheckResult, HealthStatus} from "../types";
 import {PROVIDER_CHECK_ATTEMPT_TIMEOUT_MS, PROVIDER_CHECK_MAX_ATTEMPTS} from "../providers";
 
@@ -35,10 +36,6 @@ function formatDuration(value: number | null): string {
   return typeof value === "number" ? `${value}ms` : "N/A";
 }
 
-function normalizeGroupName(groupName: string | null | undefined): string {
-  return groupName?.trim() || "默认分组";
-}
-
 function logFullMessage(message: string): void {
   const normalizedMessage = message.replace(/\r\n/g, "\n");
   const lines = normalizedMessage.split("\n");
@@ -54,39 +51,18 @@ function logFailedResultsByGroup(results: CheckResult[]): void {
     return;
   }
 
-  const groupedResults = new Map<string, CheckResult[]>();
-  for (const result of failedResults) {
-    const groupName = normalizeGroupName(result.groupName);
-    const items = groupedResults.get(groupName);
-    if (items) {
-      items.push(result);
-      continue;
-    }
-    groupedResults.set(groupName, [result]);
-  }
-
   console.error("[check-cx] ==================================================");
-  console.error(
-    `[check-cx] 本轮检测失败批次：共 ${failedResults.length} 条，分为 ${groupedResults.size} 组`
-  );
+  console.error(`[check-cx] 本轮检测失败：共 ${failedResults.length} 条`);
 
-  for (const [groupName, items] of [...groupedResults.entries()].sort(([left], [right]) =>
-    left.localeCompare(right)
-  )) {
-    console.error(`[check-cx] [${groupName}] ${items.length} 条`);
+  for (const result of failedResults.sort((left, right) => left.name.localeCompare(right.name))) {
+    console.error(
+      `[check-cx]   - ${result.name}(${result.type}/${result.model}) -> ${result.status} | latency=${formatDuration(
+        result.latencyMs
+      )} | ping=${formatDuration(result.pingLatencyMs)} | endpoint=${result.endpoint}`
+    );
 
-    for (const result of items.sort((left, right) => left.name.localeCompare(right.name))) {
-      console.error(
-        `[check-cx]   - ${result.name}(${result.type}/${result.model}) -> ${result.status} | latency=${formatDuration(
-          result.latencyMs
-        )} | ping=${formatDuration(result.pingLatencyMs)} | endpoint=${result.endpoint}`
-      );
-
-      const fullMessage = result.logMessage || result.message || "无";
-      logFullMessage(fullMessage);
-    }
-
-    console.error("[check-cx] --------------------------------------------------");
+    const fullMessage = result.logMessage || result.message || "无";
+    logFullMessage(fullMessage);
   }
 
   console.error("[check-cx] ====================== 批次结束 =====================");
@@ -255,6 +231,7 @@ async function tick() {
       `[check-cx] 后台轮询完成：写入 ${results.length} 条检测结果，时间 ${new Date().toISOString()}`
     );
     logFailedResultsByGroup(results);
+    await notifyTelegramForCheckResults(results);
   } catch (error) {
     if (tickController.signal.aborted) {
       const message =

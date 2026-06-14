@@ -30,8 +30,10 @@ export interface ManagedStorageImportSummary {
     checkConfigs: number;
     historyRows: number;
     requestTemplates: number;
-    groups: number;
     notifications: number;
+    telegramAlertStates?: number;
+    telegramPushRecords?: number;
+    hasTelegramPushConfig?: boolean;
     hasSiteSettings: boolean;
   };
 }

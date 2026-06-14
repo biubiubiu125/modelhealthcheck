@@ -3,6 +3,8 @@ import "server-only";
 import type {SiteSettingsRow} from "@/lib/types/database";
 import {
   DEFAULT_SITE_SETTINGS,
+  normalizeAdminEntryPath,
+  normalizeTelegramNotificationName,
   SITE_SETTINGS_SINGLETON_KEY,
   type SiteSettings,
 } from "@/lib/types/site-settings";
@@ -60,6 +62,13 @@ function normalizeSiteSettings(row?: Partial<SiteSettingsRow> | null): SiteSetti
     adminConsoleDescription: normalizeValue(
       row?.admin_console_description,
       DEFAULT_SITE_SETTINGS.adminConsoleDescription
+    ),
+    adminEntryPath: normalizeAdminEntryPath(
+      row?.admin_entry_path ?? DEFAULT_SITE_SETTINGS.adminEntryPath
+    ),
+    telegramNotificationName: normalizeTelegramNotificationName(
+      row?.telegram_notification_name,
+      normalizeValue(row?.site_name, DEFAULT_SITE_SETTINGS.siteName)
     ),
   };
 }

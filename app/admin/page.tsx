@@ -1,9 +1,10 @@
-import {ArrowRight, BellRing, Boxes, Database, FolderTree, HardDrive, Layers3, Settings2} from "lucide-react";
+import {ArrowRight, BellRing, Boxes, Database, HardDrive, Layers3, Settings2} from "lucide-react";
 import Link from "next/link";
 
 import {AdminPanel, AdminStatCard} from "@/components/admin/admin-primitives";
 import {requireAdminSession} from "@/lib/admin/auth";
 import {loadAdminManagementData} from "@/lib/admin/data";
+import {getAdminPath} from "@/lib/admin/paths";
 import {formatAdminTimestamp, getStatusToneClass} from "@/lib/admin/view";
 import {cn} from "@/lib/utils";
 
@@ -11,51 +12,49 @@ export const dynamic = "force-dynamic";
 
 const SECTION_LINKS = [
   {
-    href: "/admin/configs",
+    suffix: "configs",
     label: "检测配置",
     summary: "配置、模型、地址、开关。",
     icon: Boxes,
   },
   {
-    href: "/admin/templates",
+    suffix: "templates",
     label: "请求模板",
     summary: "请求头和附加参数。",
     icon: Layers3,
   },
   {
-    href: "/admin/groups",
-    label: "分组信息",
-    summary: "站点链接与标签。",
-    icon: FolderTree,
-  },
-  {
-    href: "/admin/notifications",
-    label: "系统通知",
-    summary: "横幅文案和状态。",
+    suffix: "notifications",
+    label: "Telegram 推送",
+    summary: "机器人配置、测试推送和推送记录。",
     icon: BellRing,
   },
   {
-    href: "/admin/storage",
+    suffix: "storage",
     label: "存储诊断",
     summary: "后端状态和健康信息。",
     icon: HardDrive,
   },
   {
-    href: "/admin/supabase",
+    suffix: "storage",
     label: "Supabase 检查",
     summary: "Supabase 环境和修复信息。",
     icon: Database,
   },
   {
-    href: "/admin/settings",
+    suffix: "settings",
     label: "站点设置",
     summary: "名称、文案和标题。",
     icon: Settings2,
   },
 ] as const;
 
-export default async function AdminOverviewPage() {
-  await requireAdminSession();
+export default async function AdminOverviewPage({
+  adminBasePath = "/admin",
+}: {
+  adminBasePath?: string;
+} = {}) {
+  await requireAdminSession(getAdminPath(adminBasePath, "login"));
   const {overview} = await loadAdminManagementData();
 
   return (
@@ -81,14 +80,9 @@ export default async function AdminOverviewPage() {
           helper="复用请求头和附加参数"
         />
         <AdminStatCard
-          label="分组信息"
-          value={overview.groupCount}
-          helper="首页和分组页使用"
-        />
-        <AdminStatCard
-          label="活跃通知"
-          value={overview.activeNotificationCount}
-          helper="首页横幅数量"
+          label="Telegram 推送"
+          value={overview.telegramPushRecordCount}
+          helper="最近保留的推送记录"
         />
         <AdminStatCard
           label="最近巡检"
@@ -131,7 +125,6 @@ export default async function AdminOverviewPage() {
                       </span>
                     </div>
                     <div className="text-xs text-muted-foreground">
-                      {item.groupName ? `${item.groupName} · ` : ""}
                       {formatAdminTimestamp(item.checkedAt)}
                     </div>
                   </div>
@@ -151,8 +144,8 @@ export default async function AdminOverviewPage() {
 
               return (
                 <Link
-                  key={item.href}
-                  href={item.href}
+                  key={`${item.label}-${item.suffix}`}
+                  href={getAdminPath(adminBasePath, item.suffix)}
                   className="group flex items-start justify-between gap-3 rounded-[1.5rem] border border-border/40 bg-gradient-to-br from-background/90 to-background/65 px-4 py-4 transition duration-200 hover:border-cyan-500/30 hover:shadow-md hover:shadow-cyan-500/10"
                 >
                   <div className="flex items-start gap-3">

@@ -21,13 +21,15 @@ import {
 } from "@/components/admin/admin-primitives";
 import {deleteConfigAction, manageConfigsAction, upsertConfigAction} from "@/app/admin/actions";
 import {requireAdminSession} from "@/lib/admin/auth";
-import {ADMIN_PROVIDER_TYPES, loadAdminManagementData} from "@/lib/admin/data";
+import {ADMIN_PROVIDER_TYPES, loadAdminConfigData} from "@/lib/admin/data";
+import {getAdminPath} from "@/lib/admin/paths";
 import {formatAdminTimestamp, formatJson, getAdminFeedback} from "@/lib/admin/view";
 
 export const dynamic = "force-dynamic";
 
 interface AdminConfigsPageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
+  adminBasePath?: string;
 }
 
 function getSingleParam(value: string | string[] | undefined): string | null {
@@ -38,10 +40,15 @@ function getSingleParam(value: string | string[] | undefined): string | null {
   return value ?? null;
 }
 
-export default async function AdminConfigsPage({searchParams}: AdminConfigsPageProps) {
-  await requireAdminSession();
-  const [{configs, templates, groupNames}, params] = await Promise.all([
-    loadAdminManagementData(),
+export default async function AdminConfigsPage({
+  searchParams,
+  adminBasePath = "/admin",
+}: AdminConfigsPageProps) {
+  const configsPath = getAdminPath(adminBasePath, "configs");
+
+  await requireAdminSession(getAdminPath(adminBasePath, "login"));
+  const [{configs, templates}, params] = await Promise.all([
+    loadAdminConfigData(),
     searchParams,
   ]);
   const feedback = getAdminFeedback(params);
@@ -62,7 +69,7 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
         description="模型可用逗号、顿号、分号或换行分隔；提交后会按模型自动生成多条检测配置。"
       >
         <form action={upsertConfigAction} className="space-y-4">
-          <input type="hidden" name="returnTo" value="/admin/configs" />
+          <input type="hidden" name="returnTo" value={configsPath} />
 
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <AdminField label="配置名称">
@@ -77,10 +84,6 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
                   </option>
                 ))}
               </AdminSelect>
-            </AdminField>
-
-            <AdminField label="分组名称" description="可填写新分组，也可复用已有分组。">
-              <AdminInput name="group_name" list="admin-group-name-options" placeholder="OpenAI" />
             </AdminField>
 
             <AdminField label="模型" description="支持多个模型，按逗号、分号、顿号或换行分隔。">
@@ -162,7 +165,7 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
           </div>
         ) : (
           <form action={manageConfigsAction} className="space-y-4">
-            <input type="hidden" name="returnTo" value="/admin/configs" />
+            <input type="hidden" name="returnTo" value={configsPath} />
 
             <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div className="text-sm text-muted-foreground">
@@ -190,7 +193,6 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
                     <TableHead>名称</TableHead>
                     <TableHead>类型</TableHead>
                     <TableHead>模型</TableHead>
-                    <TableHead>分组</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead>更新时间</TableHead>
                     <TableHead className="text-right">操作</TableHead>
@@ -217,7 +219,6 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
                       </TableCell>
                       <TableCell className="uppercase text-muted-foreground">{config.type}</TableCell>
                       <TableCell className="font-mono text-xs text-foreground">{config.model}</TableCell>
-                      <TableCell>{config.group_name ?? "—"}</TableCell>
                       <TableCell>
                         <div className="flex flex-wrap gap-2">
                           <span
@@ -240,7 +241,7 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
                       <TableCell className="text-right">
                         <div className="flex justify-end gap-2">
                           <Link
-                            href={`/admin/configs?edit=${config.id}`}
+                            href={`${configsPath}?edit=${config.id}`}
                             className="inline-flex items-center justify-center rounded-full border border-border/50 px-3 py-2 text-sm text-foreground transition hover:bg-muted/70"
                           >
                             编辑
@@ -272,7 +273,7 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
         >
           <form action={upsertConfigAction} className="space-y-4">
             <input type="hidden" name="id" value={editingConfig.id} />
-            <input type="hidden" name="returnTo" value="/admin/configs" />
+            <input type="hidden" name="returnTo" value={configsPath} />
 
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <AdminField label="配置名称">
@@ -287,14 +288,6 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
                     </option>
                   ))}
                 </AdminSelect>
-              </AdminField>
-
-              <AdminField label="分组名称">
-                <AdminInput
-                  name="group_name"
-                  defaultValue={editingConfig.group_name ?? ""}
-                  list="admin-group-name-options"
-                />
               </AdminField>
 
               <AdminField label="模型" description="支持多个模型，额外模型会自动复制成新配置。">
@@ -361,7 +354,7 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
                 保存修改
               </Button>
               <Link
-                href="/admin/configs"
+                href={configsPath}
                 className="inline-flex items-center justify-center rounded-full border border-border/50 px-4 py-2 text-sm text-foreground transition hover:bg-muted/70"
               >
                 取消编辑
@@ -371,11 +364,6 @@ export default async function AdminConfigsPage({searchParams}: AdminConfigsPageP
         </AdminPanel>
       ) : null}
 
-      <datalist id="admin-group-name-options">
-        {groupNames.map((item) => (
-          <option key={item} value={item} />
-        ))}
-      </datalist>
     </div>
   );
 }

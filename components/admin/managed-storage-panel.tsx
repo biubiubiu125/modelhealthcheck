@@ -14,10 +14,12 @@ import {
   AdminTextarea,
 } from "@/components/admin/admin-primitives";
 import {Button} from "@/components/ui/button";
+import {getAdminPath} from "@/lib/admin/paths";
 import {loadManagedStorageSettings} from "@/lib/storage/bootstrap-store";
 
-export function ManagedStoragePanel() {
+export function ManagedStoragePanel({adminBasePath = "/admin"}: {adminBasePath?: string}) {
   const settings = loadManagedStorageSettings();
+  const storagePath = getAdminPath(adminBasePath, "storage");
   const activeTopology = settings.activePrimaryProvider
     ? `${settings.activePrimaryProvider} → ${settings.activeBackupProvider}`
     : "仅环境变量";
@@ -76,7 +78,7 @@ export function ManagedStoragePanel() {
         ) : null}
 
         <form className="space-y-4">
-          <input type="hidden" name="returnTo" value="/admin/storage" />
+          <input type="hidden" name="returnTo" value={storagePath} />
 
           <div className="grid gap-4 md:grid-cols-2">
             <AdminField label="主后端角色" description="主后端负责当前控制面的实际读写。">
@@ -217,13 +219,14 @@ export function ManagedStoragePanel() {
         {settings.lastImportSummary ? (
           <div className="rounded-[1.5rem] border border-border/40 bg-background/60 p-4 shadow-sm">
             <div className="text-sm font-medium text-foreground">最近导入结果</div>
-            <div className="mt-3 grid gap-4 md:grid-cols-3 xl:grid-cols-7">
+            <div className="mt-3 grid gap-4 md:grid-cols-3 xl:grid-cols-4">
               <AdminStatCard label="管理员" value={settings.lastImportSummary.counts.adminUsers} helper="保留 id / hash" />
               <AdminStatCard label="配置" value={settings.lastImportSummary.counts.checkConfigs} helper="服务配置" />
               <AdminStatCard label="历史" value={settings.lastImportSummary.counts.historyRows ?? 0} helper="检测历史记录" />
               <AdminStatCard label="模板" value={settings.lastImportSummary.counts.requestTemplates} helper="请求模板" />
-              <AdminStatCard label="分组" value={settings.lastImportSummary.counts.groups} helper="分组信息" />
               <AdminStatCard label="通知" value={settings.lastImportSummary.counts.notifications} helper="系统通知" />
+              <AdminStatCard label="TG 记录" value={settings.lastImportSummary.counts.telegramPushRecords ?? 0} helper="Telegram 推送记录" />
+              <AdminStatCard label="TG 配置" value={settings.lastImportSummary.counts.hasTelegramPushConfig ? "有" : "无"} helper="Bot Token / Chat ID" />
               <AdminStatCard label="站点设置" value={settings.lastImportSummary.counts.hasSiteSettings ? "有" : "无"} helper={settings.lastImportSummary.importedAt} />
             </div>
           </div>

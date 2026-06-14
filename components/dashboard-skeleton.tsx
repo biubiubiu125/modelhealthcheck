@@ -21,24 +21,6 @@ const CornerPlus = ({ className }: { className?: string }) => (
   </svg>
 );
 
-function CardSkeleton() {
-  return (
-    <div className="flex flex-col gap-4 rounded-3xl border border-border/40 bg-background/40 p-5 shadow-sm">
-      <div className="flex items-center justify-between">
-        <SkeletonBlock className="h-4 w-32" />
-        <SkeletonBlock className="h-5 w-12 rounded-full" />
-      </div>
-      <SkeletonBlock className="h-6 w-24" />
-      <SkeletonBlock className="h-3 w-40" />
-      <SkeletonBlock className="h-16 w-full" />
-      <div className="flex items-center gap-3">
-        <SkeletonBlock className="h-3 w-20" />
-        <SkeletonBlock className="h-3 w-16" />
-      </div>
-    </div>
-  );
-}
-
 function ProviderCardSkeleton() {
   return (
     <div className="relative flex flex-col overflow-hidden rounded-2xl border border-border/40 bg-background/40 shadow-sm">
@@ -80,37 +62,6 @@ function ProviderCardSkeleton() {
         </div>
       </div>
     </div>
-  );
-}
-
-function GroupPanelSkeleton({ cardCount = 3 }: { cardCount?: number }) {
-  return (
-    <section className="rounded-3xl border bg-white/30 p-4 backdrop-blur-sm dark:bg-black/10 sm:p-6">
-      <div className="flex items-center justify-between gap-3 sm:gap-4">
-        <div className="flex flex-1 min-w-0 items-center gap-3 sm:gap-4">
-          <SkeletonBlock className="h-8 w-8 rounded-xl sm:h-10 sm:w-10" />
-          <div className="min-w-0 flex-1 space-y-2">
-            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-              <SkeletonBlock className="h-5 w-32 sm:h-6 sm:w-40" />
-              <SkeletonBlock className="h-5 w-16 rounded-full" />
-              <SkeletonBlock className="h-5 w-10 rounded-full" />
-            </div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <SkeletonBlock className="h-3 w-16" />
-              <SkeletonBlock className="h-3 w-14" />
-              <SkeletonBlock className="h-3 w-12" />
-            </div>
-          </div>
-        </div>
-        <SkeletonBlock className="h-8 w-8 rounded-full sm:h-10 sm:w-20" />
-      </div>
-
-      <div className="mt-2 grid gap-6 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: cardCount }).map((_, index) => (
-          <ProviderCardSkeleton key={`provider-card-skeleton-${index}`} />
-        ))}
-      </div>
-    </section>
   );
 }
 
@@ -174,37 +125,12 @@ export function DashboardSkeleton() {
       </header>
 
       <main className="relative z-10 min-h-[50vh]">
-        <div className="space-y-4">
-          {Array.from({ length: 3 }).map((_, index) => (
-            <GroupPanelSkeleton key={`group-panel-skeleton-${index}`} cardCount={3} />
+        <div className="grid gap-6 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({length: 9}).map((_, index) => (
+            <ProviderCardSkeleton key={`provider-card-skeleton-${index}`} />
           ))}
         </div>
       </main>
-    </div>
-  );
-}
-
-export function GroupDashboardSkeleton() {
-  return (
-    <div className="relative animate-pulse">
-      <header className="mb-8 flex flex-col justify-between gap-6 sm:mb-12 sm:gap-8 lg:flex-row lg:items-end">
-        <div className="space-y-4">
-          <SkeletonBlock className="h-4 w-28" />
-          <SkeletonBlock className="h-10 w-60" />
-          <SkeletonBlock className="h-4 w-40" />
-        </div>
-        <div className="flex flex-col items-start gap-3 sm:gap-4 lg:items-end">
-          <SkeletonBlock className="h-8 w-40 rounded-full" />
-          <SkeletonBlock className="h-8 w-36 rounded-full" />
-          <SkeletonBlock className="h-4 w-52" />
-        </div>
-      </header>
-
-      <section className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 6 }).map((_, index) => (
-          <CardSkeleton key={`group-skeleton-${index}`} />
-        ))}
-      </section>
     </div>
   );
 }

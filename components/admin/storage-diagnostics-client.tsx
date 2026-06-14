@@ -3,7 +3,6 @@
 import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {Database, HardDrive, Loader2, ShieldAlert, Sparkles, Wrench} from "lucide-react";
 
-import type {runSupabaseAutoFixAction, runSupabaseAutoMigrateAction} from "@/app/admin/actions";
 import {AdminPanel, AdminStatCard, AdminStatusBanner} from "@/components/admin/admin-primitives";
 import {buttonVariants} from "@/components/ui/button";
 import type {StorageDiagnosticsSnapshot} from "@/lib/admin/storage-diagnostics-cache";
@@ -18,8 +17,8 @@ import {cn} from "@/lib/utils";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
-type AutoFixAction = typeof runSupabaseAutoFixAction;
-type AutoMigrateAction = typeof runSupabaseAutoMigrateAction;
+type AutoFixAction = () => Promise<void>;
+type AutoMigrateAction = () => Promise<void>;
 
 function getToneClass(
   status: "pass" | "warn" | "fail" | "healthy" | "repairable" | "blocked" | "pending"
@@ -185,7 +184,7 @@ function renderMigrationCard(check: RuntimeMigrationCheck) {
   );
 }
 
-async function fetchSnapshot(force = false): Promise<StorageDiagnosticsSnapshot> {
+async function fetchSnapshot(dataEndpoint: string, force = false): Promise<StorageDiagnosticsSnapshot> {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   const search = new URLSearchParams();
@@ -194,13 +193,10 @@ async function fetchSnapshot(force = false): Promise<StorageDiagnosticsSnapshot>
   }
 
   try {
-    const response = await fetch(
-      search.size > 0 ? `/admin/storage/data?${search.toString()}` : "/admin/storage/data",
-      {
-        cache: "no-store",
-        signal: controller.signal,
-      }
-    );
+    const response = await fetch(search.size > 0 ? `${dataEndpoint}?${search.toString()}` : dataEndpoint, {
+      cache: "no-store",
+      signal: controller.signal,
+    });
 
     if (!response.ok) {
       throw new Error(`状态快照请求失败（${response.status}）`);
@@ -217,6 +213,7 @@ export function StorageDiagnosticsClient(props: {
   refreshAfterMount: boolean;
   runAutoFixAction: AutoFixAction;
   runAutoMigrateAction: AutoMigrateAction;
+  dataEndpoint?: string;
 }) {
   const [snapshot, setSnapshot] = useState(props.initialSnapshot);
   const [requestError, setRequestError] = useState<string | null>(null);
@@ -235,7 +232,10 @@ export function StorageDiagnosticsClient(props: {
     }
 
     try {
-      const nextSnapshot = await fetchSnapshot(force);
+      const nextSnapshot = await fetchSnapshot(
+        props.dataEndpoint ?? "/api/internal/storage-diagnostics",
+        force
+      );
       setSnapshot(nextSnapshot);
       setRequestError(null);
     } catch (error) {
@@ -246,7 +246,7 @@ export function StorageDiagnosticsClient(props: {
         setIsManualRefreshPending(false);
       }
     }
-  }, []);
+  }, [props.dataEndpoint]);
 
   useEffect(() => {
     if (didMountRefreshRef.current) {

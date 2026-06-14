@@ -24,7 +24,6 @@ interface ProviderStatus {
   name: string;
   type: string;
   model: string;
-  group: string | null;
   endpoint: string;
   latest: {
     status: HealthStatus;
@@ -61,7 +60,6 @@ interface ApiResponse {
     pollIntervalMs: number;
     pollIntervalLabel: string;
     filters: {
-      group: string | null;
       model: string | null;
     };
   };
@@ -136,7 +134,6 @@ function computeStatistics(items: CheckResult[]): ProviderStatistics {
 
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
-  const groupFilter = searchParams.get("group");
   const modelFilter = searchParams.get("model");
 
   const allConfigs = await loadProviderConfigsFromDB();
@@ -151,9 +148,6 @@ export async function GET(request: NextRequest) {
   const providers: ProviderStatus[] = [];
 
   for (const config of allConfigs) {
-    if (groupFilter && config.groupName !== groupFilter) {
-      continue;
-    }
     if (modelFilter && config.model !== modelFilter) {
       continue;
     }
@@ -170,7 +164,6 @@ export async function GET(request: NextRequest) {
       name: config.name,
       type: config.type,
       model: config.model,
-      group: config.groupName || null,
       endpoint: config.endpoint,
       latest: latest
         ? {
@@ -246,7 +239,6 @@ export async function GET(request: NextRequest) {
       pollIntervalMs: getPollingIntervalMs(),
       pollIntervalLabel: getPollingIntervalLabel(),
       filters: {
-        group: groupFilter,
         model: modelFilter,
       },
     },

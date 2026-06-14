@@ -1,8 +1,17 @@
 import "server-only";
 
-import type {CheckConfigRow, CheckRequestTemplateRow, GroupInfoRow, SystemNotificationRow} from "@/lib/types/database";
+import type {CheckConfigRow, CheckRequestTemplateRow, SystemNotificationRow} from "@/lib/types/database";
 import {loadDashboardData} from "@/lib/core/dashboard-data";
+import {
+  getDefaultTelegramPushConfigRow,
+  TELEGRAM_PUSH_SINGLETON_KEY,
+} from "@/lib/storage/shared";
 import {getControlPlaneStorage, getStorageCapabilities} from "@/lib/storage/resolver";
+import type {
+  TelegramAlertStateRecord,
+  TelegramPushConfigRecord,
+  TelegramPushRecord,
+} from "@/lib/storage/types";
 import {logError} from "@/lib/utils";
 
 export const ADMIN_PROVIDER_TYPES = ["openai", "anthropic", "gemini"] as const;
@@ -20,15 +29,14 @@ export interface AdminOverviewData {
   enabledConfigCount: number;
   maintenanceCount: number;
   templateCount: number;
-  groupCount: number;
   activeNotificationCount: number;
+  telegramPushRecordCount: number;
   lastCheckedAt: string | null;
   latestStatuses: Array<{
     id: string;
     name: string;
     status: string;
     checkedAt: string;
-    groupName: string | null;
   }>;
   statusBreakdown: Array<{
     status: string;
@@ -39,10 +47,48 @@ export interface AdminOverviewData {
 export interface AdminManagementData {
   configs: AdminCheckConfigRow[];
   templates: CheckRequestTemplateRow[];
-  groups: GroupInfoRow[];
   notifications: SystemNotificationRow[];
-  groupNames: string[];
   overview: AdminOverviewData;
+}
+
+export interface AdminConfigData {
+  configs: AdminCheckConfigRow[];
+  templates: CheckRequestTemplateRow[];
+}
+
+export interface AdminTelegramPushData {
+  config: TelegramPushConfigRecord;
+  records: TelegramPushRecord[];
+  retryableRecordIds: string[];
+  detail: TelegramPushRecord | null;
+}
+
+function isTimestampAtOrAfter(value: string | null | undefined, baseline: string | null): boolean {
+  if (!value || !baseline) {
+    return false;
+  }
+
+  const timestamp = Date.parse(value);
+  const baselineTimestamp = Date.parse(baseline);
+  return (
+    Number.isFinite(timestamp) &&
+    Number.isFinite(baselineTimestamp) &&
+    timestamp >= baselineTimestamp
+  );
+}
+
+function isRecordBeforeCurrentFailure(
+  record: TelegramPushRecord,
+  state: TelegramAlertStateRecord
+): boolean {
+  const recordCreatedAt = Date.parse(record.created_at);
+  const failureStartedAt = Date.parse(state.failure_started_at ?? state.last_failure_at ?? "");
+
+  return (
+    Number.isFinite(recordCreatedAt) &&
+    Number.isFinite(failureStartedAt) &&
+    recordCreatedAt < failureStartedAt
+  );
 }
 
 async function loadConfigs(): Promise<AdminCheckConfigRow[]> {
@@ -55,11 +101,6 @@ async function loadTemplates(): Promise<CheckRequestTemplateRow[]> {
   return storage.requestTemplates.list();
 }
 
-async function loadGroups(): Promise<GroupInfoRow[]> {
-  const storage = await getControlPlaneStorage();
-  return storage.groups.list();
-}
-
 async function loadNotifications(): Promise<SystemNotificationRow[]> {
   const storage = await getControlPlaneStorage();
   return storage.notifications.list();
@@ -68,15 +109,14 @@ async function loadNotifications(): Promise<SystemNotificationRow[]> {
 function buildOverview(input: {
   configs: AdminCheckConfigRow[];
   templates: CheckRequestTemplateRow[];
-  groups: GroupInfoRow[];
   notifications: SystemNotificationRow[];
+  telegramPushRecordCount: number;
   lastCheckedAt: string | null;
   latestStatuses: Array<{
     id: string;
     name: string;
     status: string;
     checkedAt: string;
-    groupName: string | null;
   }>;
 }): AdminOverviewData {
   const statusMap = new Map<string, number>();
@@ -90,8 +130,8 @@ function buildOverview(input: {
     enabledConfigCount: input.configs.filter((item) => item.enabled).length,
     maintenanceCount: input.configs.filter((item) => item.is_maintenance).length,
     templateCount: input.templates.length,
-    groupCount: input.groups.length,
     activeNotificationCount: input.notifications.filter((item) => item.is_active).length,
+    telegramPushRecordCount: input.telegramPushRecordCount,
     lastCheckedAt: input.lastCheckedAt,
     latestStatuses: input.latestStatuses,
     statusBreakdown: [...statusMap.entries()]
@@ -102,13 +142,20 @@ function buildOverview(input: {
 
 export async function loadAdminManagementData(): Promise<AdminManagementData> {
   const capabilities = getStorageCapabilities();
-  const [configs, templates, groups, notifications] = await Promise.all([
+  const [configs, templates, notifications] = await Promise.all([
     loadConfigs(),
     loadTemplates(),
-    loadGroups(),
     loadNotifications(),
   ]);
+  let telegramPushRecordCount = 0;
   let dashboard: Awaited<ReturnType<typeof loadDashboardData>> | null = null;
+
+  try {
+    const storage = await getControlPlaneStorage();
+    telegramPushRecordCount = (await storage.telegramPushRecords.list({limit: 100})).length;
+  } catch (error) {
+    logError("load admin telegram push records failed", error);
+  }
 
   if (capabilities.historySnapshots || capabilities.availabilityStats) {
     try {
@@ -117,14 +164,6 @@ export async function loadAdminManagementData(): Promise<AdminManagementData> {
       logError("load admin overview dashboard failed", error);
     }
   }
-
-  const groupNames = Array.from(
-    new Set(
-      [...groups.map((item) => item.group_name), ...configs.map((item) => item.group_name ?? "")]
-        .map((item) => item.trim())
-        .filter(Boolean)
-    )
-  ).sort((left, right) => left.localeCompare(right, "zh-CN"));
 
   const latestStatuses = (dashboard?.providerTimelines ?? [])
     .slice()
@@ -138,22 +177,104 @@ export async function loadAdminManagementData(): Promise<AdminManagementData> {
       name: item.latest.name,
       status: item.latest.status,
       checkedAt: item.latest.checkedAt,
-      groupName: item.latest.groupName ?? null,
     }));
 
   return {
     configs,
     templates,
-    groups,
     notifications,
-    groupNames,
     overview: buildOverview({
       configs,
       templates,
-      groups,
       notifications,
+      telegramPushRecordCount,
       lastCheckedAt: dashboard?.lastUpdated ?? null,
       latestStatuses,
     }),
+  };
+}
+
+export async function loadAdminConfigData(): Promise<AdminConfigData> {
+  const [configs, templates] = await Promise.all([loadConfigs(), loadTemplates()]);
+
+  return {
+    configs,
+    templates,
+  };
+}
+
+export async function loadAdminTelegramPushData(
+  detailId?: string | null
+): Promise<AdminTelegramPushData> {
+  const storage = await getControlPlaneStorage();
+  const [config, records, alertStates, detail] = await Promise.all([
+    storage.telegramPushConfig.getSingleton(TELEGRAM_PUSH_SINGLETON_KEY),
+    storage.telegramPushRecords.list({limit: 100}),
+    storage.telegramAlertStates.list({limit: null}),
+    detailId ? storage.telegramPushRecords.getById(detailId) : Promise.resolve(null),
+  ]);
+  const latestRecordRequests = new Map<string, Promise<TelegramPushRecord | null>>();
+  for (const record of records) {
+    if (!record.event_type) {
+      continue;
+    }
+
+    const retryKey =
+      record.event_type === "test"
+        ? "test"
+        : record.notification_key
+          ? `${record.notification_key}:${record.event_type}`
+          : null;
+    if (!retryKey) {
+      continue;
+    }
+
+    latestRecordRequests.set(
+      retryKey,
+      storage.telegramPushRecords.findLatestByContext({
+        notificationKey: record.notification_key,
+        eventType: record.event_type,
+      })
+    );
+  }
+  const latestRecords = (await Promise.all(latestRecordRequests.values())).filter(
+    (record): record is TelegramPushRecord => Boolean(record)
+  );
+
+  const alertStateByKey = new Map<string, TelegramAlertStateRecord>(
+    alertStates.map((state) => [state.notification_key, state])
+  );
+  const retryableRecordIds = latestRecords
+    .filter((record) => {
+      if (record.status !== "failed") {
+        return false;
+      }
+
+      if (record.event_type === "test") {
+        return true;
+      }
+
+      const state = record.notification_key ? alertStateByKey.get(record.notification_key) : null;
+      if (!state || state.state !== "failed" || isRecordBeforeCurrentFailure(record, state)) {
+        return false;
+      }
+
+      if (record.event_type === "failure") {
+        return !isTimestampAtOrAfter(state.last_notified_at, state.failure_started_at);
+      }
+
+      return (
+        record.event_type === "recovery" &&
+        isTimestampAtOrAfter(state.last_notified_at, state.failure_started_at) &&
+        state.success_count >= 1
+      );
+    })
+    .map((record) => record.id);
+
+  return {
+    config: config ?? getDefaultTelegramPushConfigRow(),
+    records,
+    retryableRecordIds,
+    detail,
   };
 }

@@ -1,21 +1,29 @@
 CREATE TABLE IF NOT EXISTS public.site_settings (
   singleton_key text PRIMARY KEY DEFAULT 'global' CHECK (singleton_key = 'global'),
-  site_name text NOT NULL DEFAULT '模型中转状态检测',
-  site_description text NOT NULL DEFAULT '实时检测 OpenAI / Gemini / Anthropic 对话接口的可用性与延迟',
+  site_name text NOT NULL DEFAULT 'RKAPI模型状态检测',
+  site_description text NOT NULL DEFAULT '实时检测 AI 模型接口的可用性与延迟',
   site_icon_url text NOT NULL DEFAULT '/favicon.png',
-  hero_badge text NOT NULL DEFAULT 'System Status',
-  hero_title_primary text NOT NULL DEFAULT '模型中转',
-  hero_title_secondary text NOT NULL DEFAULT '状态检测',
-  hero_description text NOT NULL DEFAULT '实时追踪各大 AI 模型对话接口的可用性、延迟与官方服务状态。\nAdvanced performance metrics for next-gen intelligence.',
-  footer_brand text NOT NULL DEFAULT '模型中转状态检测',
+  hero_badge text NOT NULL DEFAULT '',
+  hero_title_primary text NOT NULL DEFAULT '',
+  hero_title_secondary text NOT NULL DEFAULT '',
+  hero_description text NOT NULL DEFAULT '',
+  footer_brand text NOT NULL DEFAULT 'RKAPI模型状态检测',
   admin_console_title text NOT NULL DEFAULT '站点管理后台',
   admin_console_description text NOT NULL DEFAULT '针对当前监控站点的数据源、公告和全局站点设置进行统一维护。',
+  admin_entry_path text NOT NULL DEFAULT '/admin',
+  telegram_notification_name text NOT NULL DEFAULT 'RKAPI模型监控',
   created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
   updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
 );
 
 ALTER TABLE public.site_settings
   ADD COLUMN IF NOT EXISTS site_icon_url text NOT NULL DEFAULT '/favicon.png';
+
+ALTER TABLE public.site_settings
+  ADD COLUMN IF NOT EXISTS admin_entry_path text NOT NULL DEFAULT '/admin';
+
+ALTER TABLE public.site_settings
+  ADD COLUMN IF NOT EXISTS telegram_notification_name text NOT NULL DEFAULT 'RKAPI模型监控';
 
 ALTER TABLE public.site_settings ENABLE ROW LEVEL SECURITY;
 
@@ -52,22 +60,26 @@ BEGIN
     EXECUTE $sql$
       CREATE TABLE IF NOT EXISTS dev.site_settings (
         singleton_key text PRIMARY KEY DEFAULT 'global' CHECK (singleton_key = 'global'),
-        site_name text NOT NULL DEFAULT '模型中转状态检测',
-        site_description text NOT NULL DEFAULT '实时检测 OpenAI / Gemini / Anthropic 对话接口的可用性与延迟',
+        site_name text NOT NULL DEFAULT 'RKAPI模型状态检测',
+        site_description text NOT NULL DEFAULT '实时检测 AI 模型接口的可用性与延迟',
         site_icon_url text NOT NULL DEFAULT '/favicon.png',
-        hero_badge text NOT NULL DEFAULT 'System Status',
-        hero_title_primary text NOT NULL DEFAULT '模型中转',
-        hero_title_secondary text NOT NULL DEFAULT '状态检测',
-        hero_description text NOT NULL DEFAULT '实时追踪各大 AI 模型对话接口的可用性、延迟与官方服务状态。\nAdvanced performance metrics for next-gen intelligence.',
-        footer_brand text NOT NULL DEFAULT '模型中转状态检测',
+        hero_badge text NOT NULL DEFAULT '',
+        hero_title_primary text NOT NULL DEFAULT '',
+        hero_title_secondary text NOT NULL DEFAULT '',
+        hero_description text NOT NULL DEFAULT '',
+        footer_brand text NOT NULL DEFAULT 'RKAPI模型状态检测',
         admin_console_title text NOT NULL DEFAULT '站点管理后台',
         admin_console_description text NOT NULL DEFAULT '针对当前监控站点的数据源、公告和全局站点设置进行统一维护。',
+        admin_entry_path text NOT NULL DEFAULT '/admin',
+        telegram_notification_name text NOT NULL DEFAULT 'RKAPI模型监控',
         created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
         updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
       );
     $sql$;
 
     EXECUTE 'ALTER TABLE dev.site_settings ADD COLUMN IF NOT EXISTS site_icon_url text NOT NULL DEFAULT ''/favicon.png''';
+    EXECUTE 'ALTER TABLE dev.site_settings ADD COLUMN IF NOT EXISTS admin_entry_path text NOT NULL DEFAULT ''/admin''';
+    EXECUTE 'ALTER TABLE dev.site_settings ADD COLUMN IF NOT EXISTS telegram_notification_name text NOT NULL DEFAULT ''RKAPI模型监控''';
 
     EXECUTE 'ALTER TABLE dev.site_settings ENABLE ROW LEVEL SECURITY';
     EXECUTE 'DROP POLICY IF EXISTS "Allow public read site settings" ON dev.site_settings';

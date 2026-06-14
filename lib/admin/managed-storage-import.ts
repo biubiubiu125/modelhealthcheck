@@ -7,6 +7,7 @@ import type {ControlPlaneStorage, StoredCheckConfigRow} from "@/lib/storage/type
 import {createPostgresControlPlaneStorage} from "@/lib/storage/postgres";
 import type {HistorySnapshotRow} from "@/lib/types/database";
 import {SITE_SETTINGS_SINGLETON_KEY} from "@/lib/types/site-settings";
+import {TELEGRAM_PUSH_SINGLETON_KEY} from "@/lib/storage/shared";
 
 import type {
   ManagedStorageImportSourceProvider,
@@ -20,8 +21,10 @@ interface ControlPlaneSnapshot {
   checkConfigs: StoredCheckConfigRow[];
   historyRows: HistorySnapshotRow[];
   requestTemplates: Awaited<ReturnType<ControlPlaneStorage["requestTemplates"]["list"]>>;
-  groups: Awaited<ReturnType<ControlPlaneStorage["groups"]["list"]>>;
   notifications: Awaited<ReturnType<ControlPlaneStorage["notifications"]["list"]>>;
+  telegramAlertStates: Awaited<ReturnType<ControlPlaneStorage["telegramAlertStates"]["list"]>>;
+  telegramPushConfig: Awaited<ReturnType<ControlPlaneStorage["telegramPushConfig"]["getSingleton"]>>;
+  telegramPushRecords: Awaited<ReturnType<ControlPlaneStorage["telegramPushRecords"]["list"]>>;
 }
 
 interface ManagedImportVerificationResult {
@@ -33,13 +36,24 @@ interface ManagedImportVerificationResult {
 
 async function collectSnapshot(storage: ControlPlaneStorage): Promise<ControlPlaneSnapshot> {
   await storage.ensureReady();
-  const [adminUsers, siteSettings, checkConfigs, requestTemplates, groups, notifications] = await Promise.all([
+  const [
+    adminUsers,
+    siteSettings,
+    checkConfigs,
+    requestTemplates,
+    notifications,
+    telegramAlertStates,
+    telegramPushConfig,
+    telegramPushRecords,
+  ] = await Promise.all([
     storage.adminUsers.list(),
     storage.siteSettings.getSingleton(SITE_SETTINGS_SINGLETON_KEY),
     storage.checkConfigs.list(),
     storage.requestTemplates.list(),
-    storage.groups.list(),
     storage.notifications.list(),
+    storage.telegramAlertStates.list({limit: null}),
+    storage.telegramPushConfig.getSingleton(TELEGRAM_PUSH_SINGLETON_KEY),
+    storage.telegramPushRecords.list({limit: null}),
   ]);
   const configIds = checkConfigs.map((row) => row.id);
   const historyRows =
@@ -56,31 +70,42 @@ async function collectSnapshot(storage: ControlPlaneStorage): Promise<ControlPla
     checkConfigs,
     historyRows,
     requestTemplates,
-    groups,
     notifications,
+    telegramAlertStates,
+    telegramPushConfig,
+    telegramPushRecords,
   };
 }
 
-async function syncCollection<T extends {id: string}>(input: {
+async function syncCollection<T>(input: {
   sourceRows: T[];
   targetRows: T[];
   upsert: (row: T) => Promise<void>;
   remove: (id: string) => Promise<void>;
+  getId?: (row: T) => string;
 }): Promise<void> {
-  const sourceIds = new Set(input.sourceRows.map((row) => row.id));
+  const getId = input.getId ?? ((row: T) => (row as T & {id: string}).id);
+  const sourceIds = new Set(input.sourceRows.map(getId));
   for (const row of input.sourceRows) {
     await input.upsert(row);
   }
 
   for (const row of input.targetRows) {
-    if (!sourceIds.has(row.id)) {
-      await input.remove(row.id);
+    const id = getId(row);
+    if (!sourceIds.has(id)) {
+      await input.remove(id);
     }
   }
 }
 
 function sortById<T extends {id: string}>(rows: T[]): T[] {
   return [...rows].sort((left, right) => left.id.localeCompare(right.id, "en"));
+}
+
+function sortByNotificationKey<T extends {notification_key: string}>(rows: T[]): T[] {
+  return [...rows].sort((left, right) =>
+    left.notification_key.localeCompare(right.notification_key, "en")
+  );
 }
 
 function stableSortKeys(value: unknown): unknown {
@@ -133,6 +158,8 @@ function createSnapshotFingerprint(snapshot: ControlPlaneSnapshot): string {
           footer_brand: snapshot.siteSettings.footer_brand,
           admin_console_title: snapshot.siteSettings.admin_console_title,
           admin_console_description: snapshot.siteSettings.admin_console_description,
+          admin_entry_path: snapshot.siteSettings.admin_entry_path,
+          telegram_notification_name: snapshot.siteSettings.telegram_notification_name,
         }
       : null,
     checkConfigs: sortById(snapshot.checkConfigs).map((row) => ({
@@ -164,17 +191,47 @@ function createSnapshotFingerprint(snapshot: ControlPlaneSnapshot): string {
       request_header: row.request_header ?? null,
       metadata: row.metadata ?? null,
     })),
-    groups: sortById(snapshot.groups).map((row) => ({
-      id: row.id,
-      group_name: row.group_name,
-      website_url: row.website_url ?? null,
-      tags: row.tags ?? null,
-    })),
     notifications: sortById(snapshot.notifications).map((row) => ({
       id: row.id,
       message: row.message,
       is_active: row.is_active,
       level: row.level,
+    })),
+    telegramPushConfig: snapshot.telegramPushConfig
+      ? {
+          singleton_key: snapshot.telegramPushConfig.singleton_key,
+          project_name: snapshot.telegramPushConfig.project_name,
+          bot_token: snapshot.telegramPushConfig.bot_token,
+          chat_id: snapshot.telegramPushConfig.chat_id,
+          auto_push_enabled: snapshot.telegramPushConfig.auto_push_enabled,
+        }
+      : null,
+    telegramAlertStates: sortByNotificationKey(snapshot.telegramAlertStates).map((row) => ({
+      notification_key: row.notification_key,
+      config_id: row.config_id,
+      model: row.model,
+      state: row.state,
+      failure_count: row.failure_count,
+      success_count: row.success_count,
+      last_status: row.last_status,
+      last_message: row.last_message,
+      failure_started_at: row.failure_started_at,
+      last_failure_at: row.last_failure_at,
+      last_success_at: row.last_success_at,
+      last_notified_at: row.last_notified_at,
+    })),
+    telegramPushRecords: sortById(snapshot.telegramPushRecords).map((row) => ({
+      id: row.id,
+      project_name: row.project_name,
+      title: row.title,
+      content: row.content,
+      chat_id: row.chat_id,
+      notification_key: row.notification_key,
+      event_type: row.event_type,
+      status: row.status,
+      push_count: row.push_count,
+      failure_reason: row.failure_reason,
+      last_pushed_at: row.last_pushed_at,
     })),
   });
 
@@ -249,17 +306,33 @@ export async function importControlPlaneToTarget(input: {
   });
 
   await syncCollection({
-    sourceRows: sourceSnapshot.groups,
-    targetRows: targetSnapshot.groups,
-    upsert: (row) => targetStorage.groups.upsert(row),
-    remove: (id) => targetStorage.groups.delete(id),
-  });
-
-  await syncCollection({
     sourceRows: sourceSnapshot.notifications,
     targetRows: targetSnapshot.notifications,
     upsert: (row) => targetStorage.notifications.upsert(row),
     remove: (id) => targetStorage.notifications.delete(id),
+  });
+
+  if (sourceSnapshot.telegramPushConfig) {
+    await targetStorage.telegramPushConfig.upsert(sourceSnapshot.telegramPushConfig);
+  }
+
+  await syncCollection({
+    sourceRows: sourceSnapshot.telegramAlertStates,
+    targetRows: targetSnapshot.telegramAlertStates,
+    getId: (row) => row.notification_key,
+    upsert: async (row) => {
+      await targetStorage.telegramAlertStates.upsert(row);
+    },
+    remove: (notificationKey) => targetStorage.telegramAlertStates.delete(notificationKey),
+  });
+
+  await syncCollection({
+    sourceRows: sourceSnapshot.telegramPushRecords,
+    targetRows: targetSnapshot.telegramPushRecords,
+    upsert: async (row) => {
+      await targetStorage.telegramPushRecords.create(row);
+    },
+    remove: (id) => targetStorage.telegramPushRecords.delete(id),
   });
 
   await syncCollection({
@@ -291,8 +364,10 @@ export async function importControlPlaneToTarget(input: {
       checkConfigs: sourceSnapshot.checkConfigs.length,
       historyRows: sourceSnapshot.historyRows.length,
       requestTemplates: sourceSnapshot.requestTemplates.length,
-      groups: sourceSnapshot.groups.length,
       notifications: sourceSnapshot.notifications.length,
+      telegramAlertStates: sourceSnapshot.telegramAlertStates.length,
+      telegramPushRecords: sourceSnapshot.telegramPushRecords.length,
+      hasTelegramPushConfig: Boolean(sourceSnapshot.telegramPushConfig),
       hasSiteSettings: Boolean(sourceSnapshot.siteSettings),
     },
   };

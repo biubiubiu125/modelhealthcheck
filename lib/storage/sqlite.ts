@@ -11,14 +11,17 @@ import {
   createStorageId,
   getDefaultRequestTemplateRows,
   getDefaultSiteSettingsRow,
+  getDefaultTelegramPushConfigRow,
   mapAdminUserRecord,
   mapAvailabilityStatsRow,
   mapCheckConfigRow,
-  mapGroupInfoRow,
   mapHistorySnapshotRow,
   mapNotificationRow,
   mapRequestTemplateRow,
   mapSiteSettingsRow,
+  mapTelegramAlertStateRow,
+  mapTelegramPushConfigRow,
+  mapTelegramPushRecordRow,
   nowIso,
   serializeJson,
   SQLITE_CONTROL_PLANE_SCHEMA_STATEMENTS,
@@ -27,12 +30,15 @@ import {
 import type {
   CheckConfigMutationInput,
   ControlPlaneStorage,
-  GroupMutationInput,
   NotificationMutationInput,
   RequestTemplateMutationInput,
   RuntimeHistoryQueryOptions,
   SiteSettingsMutationInput,
   StorageCapabilities,
+  TelegramAlertStateMutationInput,
+  TelegramPushConfigMutationInput,
+  TelegramPushRecordMutationInput,
+  TelegramPushRecordStatusUpdateInput,
 } from "./types";
 
 const capabilities: StorageCapabilities = {
@@ -41,7 +47,6 @@ const capabilities: StorageCapabilities = {
   siteSettings: true,
   controlPlaneCrud: true,
   requestTemplates: true,
-  groups: true,
   notifications: true,
   historySnapshots: true,
   availabilityStats: true,
@@ -122,6 +127,18 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
         }
 
         ensureColumnExists(db, "site_settings", "site_icon_url", "text NOT NULL DEFAULT '/favicon.png'");
+        ensureColumnExists(db, "site_settings", "admin_entry_path", "text NOT NULL DEFAULT '/admin'");
+        ensureColumnExists(
+          db,
+          "site_settings",
+          "telegram_notification_name",
+          "text NOT NULL DEFAULT 'RKAPI模型监控'"
+        );
+        ensureColumnExists(db, "telegram_push_records", "notification_key", "text");
+        ensureColumnExists(db, "telegram_push_records", "event_type", "text");
+        db.prepare(
+          `CREATE INDEX IF NOT EXISTS idx_telegram_push_records_notification_key ON telegram_push_records (notification_key)`
+        ).run();
 
         const defaults = getDefaultSiteSettingsRow();
         db.prepare(
@@ -138,10 +155,12 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
               footer_brand,
               admin_console_title,
               admin_console_description,
+              admin_entry_path,
+              telegram_notification_name,
               created_at,
               updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(singleton_key) DO NOTHING
           `
         ).run(
@@ -156,8 +175,35 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
           defaults.footer_brand,
           defaults.admin_console_title,
           defaults.admin_console_description,
+          defaults.admin_entry_path,
+          defaults.telegram_notification_name,
           defaults.created_at,
           defaults.updated_at
+        );
+
+        const telegramDefaults = getDefaultTelegramPushConfigRow();
+        db.prepare(
+          `
+            INSERT INTO telegram_push_config (
+              singleton_key,
+              project_name,
+              bot_token,
+              chat_id,
+              auto_push_enabled,
+              created_at,
+              updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(singleton_key) DO NOTHING
+          `
+        ).run(
+          telegramDefaults.singleton_key,
+          telegramDefaults.project_name,
+          telegramDefaults.bot_token,
+          telegramDefaults.chat_id,
+          telegramDefaults.auto_push_enabled ? 1 : 0,
+          telegramDefaults.created_at,
+          telegramDefaults.updated_at
         );
 
         const templateStatement = db.prepare(
@@ -586,7 +632,8 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
               `
                 SELECT singleton_key, site_name, site_description, site_icon_url, hero_badge, hero_title_primary,
                        hero_title_secondary, hero_description, footer_brand,
-                       admin_console_title, admin_console_description, created_at, updated_at
+                       admin_console_title, admin_console_description, admin_entry_path,
+                       telegram_notification_name, created_at, updated_at
                 FROM site_settings
                 WHERE singleton_key = ?
                 LIMIT 1
@@ -618,10 +665,12 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
                 footer_brand,
                 admin_console_title,
                 admin_console_description,
+                admin_entry_path,
+                telegram_notification_name,
                 created_at,
                 updated_at
               )
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(singleton_key) DO UPDATE SET
                 site_name = excluded.site_name,
                 site_description = excluded.site_description,
@@ -633,6 +682,8 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
                 footer_brand = excluded.footer_brand,
                 admin_console_title = excluded.admin_console_title,
                 admin_console_description = excluded.admin_console_description,
+                admin_entry_path = excluded.admin_entry_path,
+                telegram_notification_name = excluded.telegram_notification_name,
                 updated_at = excluded.updated_at
             `
           ).run(
@@ -647,6 +698,8 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
             input.footer_brand,
             input.admin_console_title,
             input.admin_console_description,
+            input.admin_entry_path,
+            input.telegram_notification_name,
             timestamp,
             timestamp
           );
@@ -827,87 +880,6 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
         }
       },
     },
-    groups: {
-      async list() {
-        await ensureReady();
-        try {
-          const rows = db
-            .prepare(
-              `
-                SELECT id, group_name, website_url, tags, created_at, updated_at
-                FROM group_info
-                ORDER BY group_name ASC
-              `
-            )
-            .all() as Array<Record<string, unknown>>;
-          return rows.map(mapGroupInfoRow);
-        } catch (error) {
-          wrapError("读取分组信息", error);
-        }
-      },
-      async getByName(groupName) {
-        await ensureReady();
-        try {
-          const row = db
-            .prepare(
-              `
-                SELECT id, group_name, website_url, tags, created_at, updated_at
-                FROM group_info
-                WHERE group_name = ?
-                LIMIT 1
-              `
-            )
-            .get(groupName) as Record<string, unknown> | undefined;
-
-          return row ? mapGroupInfoRow(row) : null;
-        } catch (error) {
-          wrapError("读取分组信息", error);
-        }
-      },
-      async upsert(input: GroupMutationInput) {
-        await ensureReady();
-        const timestamp = nowIso();
-        const payloadId = input.id ?? createStorageId();
-
-        try {
-          db.prepare(
-            `
-              INSERT INTO group_info (
-                id,
-                group_name,
-                website_url,
-                tags,
-                created_at,
-                updated_at
-              )
-              VALUES (?, ?, ?, ?, ?, ?)
-              ON CONFLICT(id) DO UPDATE SET
-                group_name = excluded.group_name,
-                website_url = excluded.website_url,
-                tags = excluded.tags,
-                updated_at = excluded.updated_at
-            `
-          ).run(
-            payloadId,
-            input.group_name,
-            input.website_url ?? null,
-            input.tags ?? null,
-            timestamp,
-            timestamp
-          );
-        } catch (error) {
-          wrapError("保存分组信息", error);
-        }
-      },
-      async delete(id) {
-        await ensureReady();
-        try {
-          db.prepare(`DELETE FROM group_info WHERE id = ?`).run(id);
-        } catch (error) {
-          wrapError("删除分组信息", error);
-        }
-      },
-    },
     notifications: {
       async list() {
         await ensureReady();
@@ -976,6 +948,419 @@ export function createSqliteControlPlaneStorage(filePath: string): ControlPlaneS
           db.prepare(`DELETE FROM system_notifications WHERE id = ?`).run(id);
         } catch (error) {
           wrapError("删除系统通知", error);
+        }
+      },
+    },
+    telegramAlertStates: {
+      async list(input) {
+        await ensureReady();
+        const limit = input?.limit === null ? null : Math.min(Math.max(input?.limit ?? 100, 1), 500);
+
+        try {
+          const rows = db
+            .prepare(
+              `
+                SELECT notification_key, config_id, model, state, failure_count, success_count,
+                       last_status, last_message, failure_started_at, last_failure_at,
+                       last_success_at, last_notified_at, created_at, updated_at
+                FROM telegram_alert_states
+                ORDER BY updated_at DESC, notification_key ASC
+                ${limit === null ? "" : "LIMIT ?"}
+              `
+            )
+            .all(...(limit === null ? [] : [limit])) as Array<Record<string, unknown>>;
+
+          return rows.map(mapTelegramAlertStateRow);
+        } catch (error) {
+          wrapError("读取 Telegram 告警状态列表", error);
+        }
+      },
+      async get(notificationKey) {
+        await ensureReady();
+        try {
+          const row = db
+            .prepare(
+              `
+                SELECT notification_key, config_id, model, state, failure_count, success_count,
+                       last_status, last_message, failure_started_at, last_failure_at,
+                       last_success_at, last_notified_at, created_at, updated_at
+                FROM telegram_alert_states
+                WHERE notification_key = ?
+                LIMIT 1
+              `
+            )
+            .get(notificationKey) as Record<string, unknown> | undefined;
+
+          return row ? mapTelegramAlertStateRow(row) : null;
+        } catch (error) {
+          wrapError("读取 Telegram 告警状态", error);
+        }
+      },
+      async upsert(input: TelegramAlertStateMutationInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+
+        try {
+          db.prepare(
+            `
+              INSERT INTO telegram_alert_states (
+                notification_key,
+                config_id,
+                model,
+                state,
+                failure_count,
+                success_count,
+                last_status,
+                last_message,
+                failure_started_at,
+                last_failure_at,
+                last_success_at,
+                last_notified_at,
+                created_at,
+                updated_at
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(notification_key) DO UPDATE SET
+                config_id = excluded.config_id,
+                model = excluded.model,
+                state = excluded.state,
+                failure_count = excluded.failure_count,
+                success_count = excluded.success_count,
+                last_status = excluded.last_status,
+                last_message = excluded.last_message,
+                failure_started_at = excluded.failure_started_at,
+                last_failure_at = excluded.last_failure_at,
+                last_success_at = excluded.last_success_at,
+                last_notified_at = excluded.last_notified_at,
+                updated_at = excluded.updated_at
+            `
+          ).run(
+            input.notification_key,
+            input.config_id,
+            input.model,
+            input.state,
+            input.failure_count,
+            input.success_count,
+            input.last_status ?? null,
+            input.last_message ?? null,
+            input.failure_started_at ?? null,
+            input.last_failure_at ?? null,
+            input.last_success_at ?? null,
+            input.last_notified_at ?? null,
+            timestamp,
+            timestamp
+          );
+
+          const savedRow = db
+            .prepare(
+              `
+                SELECT notification_key, config_id, model, state, failure_count, success_count,
+                       last_status, last_message, failure_started_at, last_failure_at,
+                       last_success_at, last_notified_at, created_at, updated_at
+                FROM telegram_alert_states
+                WHERE notification_key = ?
+                LIMIT 1
+              `
+            )
+            .get(input.notification_key) as Record<string, unknown> | undefined;
+          if (!savedRow) {
+            throw new Error("Telegram 告警状态保存后未找到记录");
+          }
+          return mapTelegramAlertStateRow(savedRow);
+        } catch (error) {
+          wrapError("保存 Telegram 告警状态", error);
+        }
+      },
+      async delete(notificationKey) {
+        await ensureReady();
+        try {
+          db.prepare(`DELETE FROM telegram_alert_states WHERE notification_key = ?`).run(
+            notificationKey
+          );
+        } catch (error) {
+          wrapError("删除 Telegram 告警状态", error);
+        }
+      },
+    },
+    telegramPushConfig: {
+      async getSingleton(singletonKey) {
+        await ensureReady();
+        try {
+          const row = db
+            .prepare(
+              `
+                SELECT singleton_key, project_name, bot_token, chat_id, auto_push_enabled,
+                       created_at, updated_at
+                FROM telegram_push_config
+                WHERE singleton_key = ?
+                LIMIT 1
+              `
+            )
+            .get(singletonKey) as Record<string, unknown> | undefined;
+
+          return row ? mapTelegramPushConfigRow(row) : null;
+        } catch (error) {
+          wrapError("读取 Telegram 推送配置", error);
+        }
+      },
+      async upsert(input: TelegramPushConfigMutationInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+
+        try {
+          db.prepare(
+            `
+              INSERT INTO telegram_push_config (
+                singleton_key,
+                project_name,
+                bot_token,
+                chat_id,
+                auto_push_enabled,
+                created_at,
+                updated_at
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(singleton_key) DO UPDATE SET
+                project_name = excluded.project_name,
+                bot_token = excluded.bot_token,
+                chat_id = excluded.chat_id,
+                auto_push_enabled = excluded.auto_push_enabled,
+                updated_at = excluded.updated_at
+            `
+          ).run(
+            input.singleton_key,
+            input.project_name,
+            input.bot_token,
+            input.chat_id,
+            input.auto_push_enabled ? 1 : 0,
+            timestamp,
+            timestamp
+          );
+
+          const savedRow = db
+            .prepare(
+              `
+                SELECT singleton_key, project_name, bot_token, chat_id, auto_push_enabled,
+                       created_at, updated_at
+                FROM telegram_push_config
+                WHERE singleton_key = ?
+                LIMIT 1
+              `
+            )
+            .get(input.singleton_key) as Record<string, unknown> | undefined;
+
+          if (!savedRow) {
+            throw new Error("Telegram 推送配置保存后未找到记录");
+          }
+
+          return mapTelegramPushConfigRow(savedRow);
+        } catch (error) {
+          wrapError("保存 Telegram 推送配置", error);
+        }
+      },
+    },
+    telegramPushRecords: {
+      async list(input) {
+        await ensureReady();
+        const limit = input?.limit === null ? null : Math.min(Math.max(input?.limit ?? 100, 1), 500);
+
+        try {
+          const rows = db
+            .prepare(
+              `
+                SELECT id, project_name, title, content, chat_id, status, push_count,
+                       notification_key, event_type, failure_reason, last_pushed_at,
+                       created_at, updated_at
+                FROM telegram_push_records
+                ORDER BY created_at DESC
+                ${limit === null ? "" : "LIMIT ?"}
+              `
+            )
+            .all(...(limit === null ? [] : [limit])) as Array<Record<string, unknown>>;
+
+          return rows.map(mapTelegramPushRecordRow);
+        } catch (error) {
+          wrapError("读取 Telegram 推送记录", error);
+        }
+      },
+      async getById(id) {
+        await ensureReady();
+        try {
+          const row = db
+            .prepare(
+              `
+                SELECT id, project_name, title, content, chat_id, status, push_count,
+                       notification_key, event_type, failure_reason, last_pushed_at,
+                       created_at, updated_at
+                FROM telegram_push_records
+                WHERE id = ?
+                LIMIT 1
+              `
+            )
+            .get(id) as Record<string, unknown> | undefined;
+
+          return row ? mapTelegramPushRecordRow(row) : null;
+        } catch (error) {
+          wrapError("读取 Telegram 推送记录详情", error);
+        }
+      },
+      async findLatestByContext(input) {
+        await ensureReady();
+        const isTestEvent = input.eventType === "test";
+        const whereClause = isTestEvent
+          ? "event_type = ?"
+          : "notification_key = ? AND event_type = ?";
+        const params = isTestEvent ? [input.eventType] : [input.notificationKey ?? "", input.eventType];
+
+        try {
+          const row = db
+            .prepare(
+              `
+                SELECT id, project_name, title, content, chat_id, status, push_count,
+                       notification_key, event_type, failure_reason, last_pushed_at,
+                       created_at, updated_at
+                FROM telegram_push_records
+                WHERE ${whereClause}
+                ORDER BY created_at DESC
+                LIMIT 1
+              `
+            )
+            .get(...params) as Record<string, unknown> | undefined;
+
+          return row ? mapTelegramPushRecordRow(row) : null;
+        } catch (error) {
+          wrapError("读取最新 Telegram 推送记录", error);
+        }
+      },
+      async create(input: TelegramPushRecordMutationInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+        const payloadId = input.id ?? createStorageId();
+
+        try {
+          db.prepare(
+            `
+              INSERT INTO telegram_push_records (
+                id,
+                project_name,
+                title,
+                content,
+                chat_id,
+                notification_key,
+                event_type,
+                status,
+                push_count,
+                failure_reason,
+                last_pushed_at,
+                created_at,
+                updated_at
+              )
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(id) DO UPDATE SET
+                project_name = excluded.project_name,
+                title = excluded.title,
+                content = excluded.content,
+                chat_id = excluded.chat_id,
+                notification_key = excluded.notification_key,
+                event_type = excluded.event_type,
+                status = excluded.status,
+                push_count = excluded.push_count,
+                failure_reason = excluded.failure_reason,
+                last_pushed_at = excluded.last_pushed_at,
+                updated_at = excluded.updated_at
+            `
+          ).run(
+            payloadId,
+            input.project_name,
+            input.title,
+            input.content,
+            input.chat_id ?? null,
+            input.notification_key ?? null,
+            input.event_type ?? null,
+            input.status ?? "pending",
+            input.push_count ?? 0,
+            input.failure_reason ?? null,
+            input.last_pushed_at ?? null,
+            timestamp,
+            timestamp
+          );
+
+          const savedRow = db
+            .prepare(
+              `
+                SELECT id, project_name, title, content, chat_id, status, push_count,
+                       notification_key, event_type, failure_reason, last_pushed_at,
+                       created_at, updated_at
+                FROM telegram_push_records
+                WHERE id = ?
+                LIMIT 1
+              `
+            )
+            .get(payloadId) as Record<string, unknown> | undefined;
+
+          if (!savedRow) {
+            throw new Error("Telegram 推送记录创建后未找到记录");
+          }
+
+          return mapTelegramPushRecordRow(savedRow);
+        } catch (error) {
+          wrapError("创建 Telegram 推送记录", error);
+        }
+      },
+      async updateStatus(input: TelegramPushRecordStatusUpdateInput) {
+        await ensureReady();
+        const timestamp = nowIso();
+
+        try {
+          db.prepare(
+            `
+              UPDATE telegram_push_records
+              SET status = ?,
+                  push_count = ?,
+                  failure_reason = ?,
+                  last_pushed_at = ?,
+                  chat_id = COALESCE(?, chat_id),
+                  updated_at = ?
+              WHERE id = ?
+            `
+          ).run(
+            input.status,
+            input.push_count,
+            input.failure_reason ?? null,
+            input.last_pushed_at ?? null,
+            input.chat_id ?? null,
+            timestamp,
+            input.id
+          );
+
+          const savedRow = db
+            .prepare(
+              `
+                SELECT id, project_name, title, content, chat_id, status, push_count,
+                       notification_key, event_type, failure_reason, last_pushed_at,
+                       created_at, updated_at
+                FROM telegram_push_records
+                WHERE id = ?
+                LIMIT 1
+              `
+            )
+            .get(input.id) as Record<string, unknown> | undefined;
+
+          if (!savedRow) {
+            throw new Error("推送记录不存在或已被删除");
+          }
+
+          return mapTelegramPushRecordRow(savedRow);
+        } catch (error) {
+          wrapError("更新 Telegram 推送记录", error);
+        }
+      },
+      async delete(id) {
+        await ensureReady();
+        try {
+          db.prepare(`DELETE FROM telegram_push_records WHERE id = ?`).run(id);
+        } catch (error) {
+          wrapError("删除 Telegram 推送记录", error);
         }
       },
     },

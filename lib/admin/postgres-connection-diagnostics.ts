@@ -3,6 +3,7 @@ import "server-only";
 import {Client} from "pg";
 
 import type {StorageDiagnosticCheck} from "@/lib/admin/storage-diagnostics";
+import {resolvePostgresSsl} from "@/lib/storage/postgres-ssl";
 import {getErrorMessage} from "@/lib/utils";
 
 const EXPECTED_CONTROL_PLANE_TABLES = [
@@ -10,18 +11,12 @@ const EXPECTED_CONTROL_PLANE_TABLES = [
   "site_settings",
   "check_configs",
   "check_request_templates",
-  "group_info",
   "system_notifications",
+  "telegram_alert_states",
+  "telegram_push_config",
+  "telegram_push_records",
 ] as const;
 const POSTGRES_TEST_TIMEOUT_MS = 10_000;
-
-function isLocalHost(hostname: string): boolean {
-  return ["localhost", "127.0.0.1"].includes(hostname);
-}
-
-function getSslMode(hostname: string): "disable" | "require" {
-  return isLocalHost(hostname) ? "disable" : "require";
-}
 
 function isAllowedProtocol(protocol: string): boolean {
   return protocol === "postgres:" || protocol === "postgresql:";
@@ -117,7 +112,8 @@ export async function runPostgresConnectionDiagnostics(
   const host = parsedUrl.hostname || null;
   const port = parsedUrl.port || null;
   const database = parsedUrl.pathname.replace(/^\//, "") || null;
-  const sslMode = host ? getSslMode(host) : "unknown";
+  const sslResolution = host ? resolvePostgresSsl(trimmed) : null;
+  const sslMode = sslResolution?.mode ?? "unknown";
   const checks: StorageDiagnosticCheck[] = [
     {
       id: "postgres-candidate-parse",
@@ -133,7 +129,7 @@ export async function runPostgresConnectionDiagnostics(
     connectionTimeoutMillis: POSTGRES_TEST_TIMEOUT_MS,
     query_timeout: POSTGRES_TEST_TIMEOUT_MS,
     statement_timeout: POSTGRES_TEST_TIMEOUT_MS,
-    ssl: host ? (sslMode === "disable" ? false : {rejectUnauthorized: false}) : false,
+    ssl: sslResolution?.ssl ?? false,
   });
 
   try {

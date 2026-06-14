@@ -10,6 +10,7 @@ import {
   hasAdminUsers,
   isTurnstileEnabled,
 } from "@/lib/admin/auth";
+import {getAdminPath} from "@/lib/admin/paths";
 import {getAdminFeedback} from "@/lib/admin/view";
 import {loadManagedStorageSettings} from "@/lib/storage/bootstrap-store";
 import {resolveDatabaseBackend} from "@/lib/storage/resolver";
@@ -18,10 +19,18 @@ export const dynamic = "force-dynamic";
 
 interface AdminLoginPageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
+  adminBasePath?: string;
 }
 
-export default async function AdminLoginPage({searchParams}: AdminLoginPageProps) {
-  await ensureLoggedOutForLoginPage();
+export default async function AdminLoginPage({
+  searchParams,
+  adminBasePath = "/admin",
+}: AdminLoginPageProps) {
+  const adminHomePath = getAdminPath(adminBasePath);
+  const adminLoginPath = getAdminPath(adminBasePath, "login");
+  const adminStoragePath = getAdminPath(adminBasePath, "storage");
+
+  await ensureLoggedOutForLoginPage(adminHomePath);
 
   const params = await searchParams;
   const feedback = getAdminFeedback(params);
@@ -97,6 +106,9 @@ export default async function AdminLoginPage({searchParams}: AdminLoginPageProps
               </div>
             ) : (
               <form action={adminExists ? loginAdminAction : bootstrapAdminAction} className="space-y-5">
+                <input type="hidden" name="returnTo" value={adminExists ? adminHomePath : adminStoragePath} />
+                <input type="hidden" name="loginReturnTo" value={adminLoginPath} />
+
                 <AdminField label="用户名">
                   <AdminInput name="username" placeholder="admin" required className="bg-background/50 focus:bg-background" />
                 </AdminField>

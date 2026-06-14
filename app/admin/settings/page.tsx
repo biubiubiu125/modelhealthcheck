@@ -15,6 +15,7 @@ import {
 } from "@/components/admin/admin-primitives";
 import {Button} from "@/components/ui/button";
 import {requireAdminSession} from "@/lib/admin/auth";
+import {getAdminPath} from "@/lib/admin/paths";
 import {SITE_ICON_ACCEPT_ATTRIBUTE, SITE_ICON_MAX_BYTES, SITE_ICON_UPLOAD_FIELD_NAME} from "@/lib/site-icons";
 import {getAdminFeedback} from "@/lib/admin/view";
 import {loadSiteSettingsState} from "@/lib/site-settings";
@@ -23,10 +24,16 @@ export const dynamic = "force-dynamic";
 
 interface AdminSettingsPageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
+  adminBasePath?: string;
 }
 
-export default async function AdminSettingsPage({searchParams}: AdminSettingsPageProps) {
-  await requireAdminSession();
+export default async function AdminSettingsPage({
+  searchParams,
+  adminBasePath = "/admin",
+}: AdminSettingsPageProps) {
+  const settingsPath = getAdminPath(adminBasePath, "settings");
+
+  await requireAdminSession(getAdminPath(adminBasePath, "login"));
   const [params, settingsState] = await Promise.all([searchParams, loadSiteSettingsState()]);
   const feedback = getAdminFeedback(params);
   const {settings, warning, source} = settingsState;
@@ -35,7 +42,7 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
     <div className="space-y-6">
       <AdminPageIntro
         title="站点设置"
-        description="统一调整站点名称、图标和页面文案。"
+        description="统一调整站点名称、图标和后台入口。"
       />
 
       {feedback ? <AdminStatusBanner type={feedback.type} message={feedback.message} /> : null}
@@ -63,7 +70,7 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
               </div>
 
               <form action={uploadSiteIconAction} className="space-y-4">
-                <input type="hidden" name="returnTo" value="/admin/settings" />
+                <input type="hidden" name="returnTo" value={settingsPath} />
                 <AdminField
                   label="上传图标文件"
                   description={`支持 PNG / ICO / WEBP / JPEG，最大 ${Math.floor(SITE_ICON_MAX_BYTES / 1024 / 1024)} MB。上传后会自动应用到浏览器标签页与侧栏图标。`}
@@ -82,7 +89,7 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
               </form>
 
               <form action={resetSiteIconAction}>
-                <input type="hidden" name="returnTo" value="/admin/settings" />
+                <input type="hidden" name="returnTo" value={settingsPath} />
                 <Button type="submit" variant="outline" className="w-full rounded-full">
                   恢复默认图标
                 </Button>
@@ -92,22 +99,14 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
 
           <AdminPanel
             title="编辑全局品牌设置"
-            description="这些内容会影响首页和后台显示。"
+            description="这些内容会影响首页标题、后台显示和后台入口路径。"
           >
             <form action={upsertSiteSettingsAction} className="space-y-4">
-              <input type="hidden" name="returnTo" value="/admin/settings" />
+              <input type="hidden" name="returnTo" value={settingsPath} />
 
               <div className="grid gap-4 md:grid-cols-2">
                 <AdminField label="站点名称" description="用于浏览器标题和部分全局品牌展示。">
                   <AdminInput name="site_name" defaultValue={settings.siteName} required />
-                </AdminField>
-
-                <AdminField label="页脚品牌名" description="用于首页底部。">
-                  <AdminInput name="footer_brand" defaultValue={settings.footerBrand} required />
-                </AdminField>
-
-                <AdminField label="首页徽标文案" description="显示在首页标题上方。">
-                  <AdminInput name="hero_badge" defaultValue={settings.heroBadge} required />
                 </AdminField>
 
                 <AdminField label="后台标题" description="显示在后台左侧壳子的主标题。">
@@ -118,35 +117,24 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
                   />
                 </AdminField>
 
-                <AdminField label="首页标题主行">
+                <AdminField
+                  label="后台入口路径"
+                  description="保存后可通过该路径及其子路径进入后台，原 /admin 仍保留。"
+                >
                   <AdminInput
-                    name="hero_title_primary"
-                    defaultValue={settings.heroTitlePrimary}
+                    name="admin_entry_path"
+                    defaultValue={settings.adminEntryPath}
+                    placeholder="/rk-admin"
                     required
                   />
                 </AdminField>
 
-                <AdminField label="首页标题副行">
-                  <AdminInput
-                    name="hero_title_secondary"
-                    defaultValue={settings.heroTitleSecondary}
-                    required
-                  />
-                </AdminField>
               </div>
 
-              <AdminField label="站点描述" description="用于浏览器摘要和分组页的衍生描述。">
+              <AdminField label="站点描述" description="用于浏览器摘要和页面说明。">
                 <AdminTextarea
                   name="site_description"
                   defaultValue={settings.siteDescription}
-                  required
-                />
-              </AdminField>
-
-              <AdminField label="首页描述" description="支持换行。">
-                <AdminTextarea
-                  name="hero_description"
-                  defaultValue={settings.heroDescription}
                   required
                 />
               </AdminField>
@@ -190,20 +178,6 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
             </div>
 
             <div className="rounded-[1.75rem] border border-border/40 bg-background/70 p-5 shadow-sm">
-              <div className="inline-flex items-center gap-2 rounded-full border border-border/40 bg-background/80 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.26em] text-muted-foreground">
-                {settings.heroBadge}
-              </div>
-              <div className="mt-4 text-3xl font-extrabold leading-tight tracking-tight text-foreground sm:text-4xl">
-                {settings.heroTitlePrimary}
-                <br />
-                <span className="text-muted-foreground">{settings.heroTitleSecondary}</span>
-              </div>
-              <p className="mt-3 whitespace-pre-line text-sm leading-7 text-muted-foreground">
-                {settings.heroDescription}
-              </p>
-            </div>
-
-            <div className="rounded-[1.75rem] border border-border/40 bg-background/70 p-5 shadow-sm">
               <div className="text-xs font-medium uppercase tracking-[0.3em] text-muted-foreground">
                 后台标题
               </div>
@@ -215,6 +189,9 @@ export default async function AdminSettingsPage({searchParams}: AdminSettingsPag
               </p>
               <div className="mt-3 text-xs text-muted-foreground">
                 当前来源：{source === "database" ? "数据库配置" : "默认回退配置"}
+              </div>
+              <div className="mt-2 text-xs text-muted-foreground">
+                后台入口：{settings.adminEntryPath}
               </div>
             </div>
           </div>

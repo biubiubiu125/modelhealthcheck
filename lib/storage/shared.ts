@@ -7,14 +7,25 @@ import type {
   AvailabilityStats,
   CheckRequestTemplateRow,
   HistorySnapshotRow,
-  GroupInfoRow,
   SiteSettingsRow,
   SystemNotificationRow,
 } from "@/lib/types/database";
 
-import type {AdminUserRecord, StoredCheckConfigRow} from "./types";
+import type {
+  AdminUserRecord,
+  StoredCheckConfigRow,
+  TelegramAlertState,
+  TelegramAlertStateRecord,
+  TelegramPushConfigRecord,
+  TelegramPushRecord,
+  TelegramPushRecordEventType,
+  TelegramPushRecordStatus,
+} from "./types";
 
 type LooseRow = Record<string, unknown>;
+
+export const TELEGRAM_PUSH_SINGLETON_KEY = "global";
+export const DEFAULT_TELEGRAM_PUSH_PROJECT_NAME = "RKAPI模型状态检测";
 
 export const POSTGRES_CONTROL_PLANE_SCHEMA_STATEMENTS = [
   `
@@ -89,10 +100,60 @@ export const POSTGRES_CONTROL_PLANE_SCHEMA_STATEMENTS = [
       footer_brand text NOT NULL,
       admin_console_title text NOT NULL,
       admin_console_description text NOT NULL,
+      admin_entry_path text NOT NULL DEFAULT '/admin',
+      telegram_notification_name text NOT NULL DEFAULT 'RKAPI模型监控',
       created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
       updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS telegram_alert_states (
+      notification_key text PRIMARY KEY,
+      config_id uuid NOT NULL,
+      model text NOT NULL,
+      state text NOT NULL DEFAULT 'healthy',
+      failure_count integer NOT NULL DEFAULT 0,
+      success_count integer NOT NULL DEFAULT 0,
+      last_status text,
+      last_message text,
+      failure_started_at timestamptz,
+      last_failure_at timestamptz,
+      last_success_at timestamptz,
+      last_notified_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+      updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS telegram_push_config (
+      singleton_key text PRIMARY KEY CHECK (singleton_key = 'global'),
+      project_name text NOT NULL DEFAULT 'RKAPI模型状态检测',
+      bot_token text,
+      chat_id text,
+      auto_push_enabled boolean NOT NULL DEFAULT true,
+      created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+      updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS telegram_push_records (
+      id uuid PRIMARY KEY,
+      project_name text NOT NULL,
+      title text NOT NULL,
+      content text NOT NULL,
+      chat_id text,
+      notification_key text,
+      event_type text,
+      status text NOT NULL DEFAULT 'pending',
+      push_count integer NOT NULL DEFAULT 0,
+      failure_reason text,
+      last_pushed_at timestamptz,
+      created_at timestamptz NOT NULL DEFAULT timezone('utc', now()),
+      updated_at timestamptz NOT NULL DEFAULT timezone('utc', now())
+    )
+  `,
+  `CREATE INDEX IF NOT EXISTS idx_telegram_push_records_created_at ON telegram_push_records (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_telegram_push_records_status ON telegram_push_records (status)`,
 ] as const;
 
 export const POSTGRES_RUNTIME_SCHEMA_STATEMENTS = [
@@ -192,10 +253,60 @@ export const SQLITE_CONTROL_PLANE_SCHEMA_STATEMENTS = [
       footer_brand text NOT NULL,
       admin_console_title text NOT NULL,
       admin_console_description text NOT NULL,
+      admin_entry_path text NOT NULL DEFAULT '/admin',
+      telegram_notification_name text NOT NULL DEFAULT 'RKAPI模型监控',
       created_at text NOT NULL,
       updated_at text NOT NULL
     )
   `,
+  `
+    CREATE TABLE IF NOT EXISTS telegram_alert_states (
+      notification_key text PRIMARY KEY,
+      config_id text NOT NULL,
+      model text NOT NULL,
+      state text NOT NULL DEFAULT 'healthy',
+      failure_count integer NOT NULL DEFAULT 0,
+      success_count integer NOT NULL DEFAULT 0,
+      last_status text,
+      last_message text,
+      failure_started_at text,
+      last_failure_at text,
+      last_success_at text,
+      last_notified_at text,
+      created_at text NOT NULL,
+      updated_at text NOT NULL
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS telegram_push_config (
+      singleton_key text PRIMARY KEY CHECK (singleton_key = 'global'),
+      project_name text NOT NULL DEFAULT 'RKAPI模型状态检测',
+      bot_token text,
+      chat_id text,
+      auto_push_enabled integer NOT NULL DEFAULT 1,
+      created_at text NOT NULL,
+      updated_at text NOT NULL
+    )
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS telegram_push_records (
+      id text PRIMARY KEY,
+      project_name text NOT NULL,
+      title text NOT NULL,
+      content text NOT NULL,
+      chat_id text,
+      notification_key text,
+      event_type text,
+      status text NOT NULL DEFAULT 'pending',
+      push_count integer NOT NULL DEFAULT 0,
+      failure_reason text,
+      last_pushed_at text,
+      created_at text NOT NULL,
+      updated_at text NOT NULL
+    )
+  `,
+  `CREATE INDEX IF NOT EXISTS idx_telegram_push_records_created_at ON telegram_push_records (created_at DESC)`,
+  `CREATE INDEX IF NOT EXISTS idx_telegram_push_records_status ON telegram_push_records (status)`,
 ] as const;
 
 export const SQLITE_RUNTIME_SCHEMA_STATEMENTS = [
@@ -342,6 +453,8 @@ export function getDefaultSiteSettingsRow(): SiteSettingsRow {
     footer_brand: DEFAULT_SITE_SETTINGS.footerBrand,
     admin_console_title: DEFAULT_SITE_SETTINGS.adminConsoleTitle,
     admin_console_description: DEFAULT_SITE_SETTINGS.adminConsoleDescription,
+    admin_entry_path: DEFAULT_SITE_SETTINGS.adminEntryPath,
+    telegram_notification_name: DEFAULT_SITE_SETTINGS.telegramNotificationName,
     created_at: timestamp,
     updated_at: timestamp,
   };
@@ -442,17 +555,6 @@ export function mapAvailabilityStatsRow(row: LooseRow): AvailabilityStats {
   };
 }
 
-export function mapGroupInfoRow(row: LooseRow): GroupInfoRow {
-  return {
-    id: toRequiredString(row.id),
-    group_name: toRequiredString(row.group_name),
-    website_url: toOptionalString(row.website_url),
-    tags: toOptionalString(row.tags),
-    created_at: toOptionalString(row.created_at) ?? undefined,
-    updated_at: toOptionalString(row.updated_at) ?? undefined,
-  };
-}
-
 export function mapNotificationRow(row: LooseRow): SystemNotificationRow {
   return {
     id: toRequiredString(row.id),
@@ -476,7 +578,75 @@ export function mapSiteSettingsRow(row: LooseRow): SiteSettingsRow {
     footer_brand: toRequiredString(row.footer_brand),
     admin_console_title: toRequiredString(row.admin_console_title),
     admin_console_description: toRequiredString(row.admin_console_description),
+    admin_entry_path:
+      toRequiredString(row.admin_entry_path) || DEFAULT_SITE_SETTINGS.adminEntryPath,
+    telegram_notification_name:
+      toRequiredString(row.telegram_notification_name) ||
+      DEFAULT_SITE_SETTINGS.telegramNotificationName,
     created_at: toOptionalString(row.created_at) ?? undefined,
     updated_at: toOptionalString(row.updated_at) ?? undefined,
+  };
+}
+
+export function getDefaultTelegramPushConfigRow(): TelegramPushConfigRecord {
+  const timestamp = nowIso();
+
+  return {
+    singleton_key: TELEGRAM_PUSH_SINGLETON_KEY,
+    project_name: DEFAULT_TELEGRAM_PUSH_PROJECT_NAME,
+    bot_token: null,
+    chat_id: null,
+    auto_push_enabled: true,
+    created_at: timestamp,
+    updated_at: timestamp,
+  };
+}
+
+export function mapTelegramAlertStateRow(row: LooseRow): TelegramAlertStateRecord {
+  return {
+    config_id: toRequiredString(row.config_id),
+    model: toRequiredString(row.model),
+    notification_key: toRequiredString(row.notification_key),
+    state: toRequiredString(row.state) as TelegramAlertState,
+    failure_count: toOptionalNumber(row.failure_count) ?? 0,
+    success_count: toOptionalNumber(row.success_count) ?? 0,
+    last_status: toOptionalString(row.last_status),
+    last_message: toOptionalString(row.last_message),
+    failure_started_at: toOptionalString(row.failure_started_at),
+    last_failure_at: toOptionalString(row.last_failure_at),
+    last_success_at: toOptionalString(row.last_success_at),
+    last_notified_at: toOptionalString(row.last_notified_at),
+    created_at: toOptionalString(row.created_at),
+    updated_at: toOptionalString(row.updated_at),
+  };
+}
+
+export function mapTelegramPushConfigRow(row: LooseRow): TelegramPushConfigRecord {
+  return {
+    singleton_key: toRequiredString(row.singleton_key) || TELEGRAM_PUSH_SINGLETON_KEY,
+    project_name: toRequiredString(row.project_name) || DEFAULT_TELEGRAM_PUSH_PROJECT_NAME,
+    bot_token: toOptionalString(row.bot_token),
+    chat_id: toOptionalString(row.chat_id),
+    auto_push_enabled: toBoolean(row.auto_push_enabled),
+    created_at: toOptionalString(row.created_at),
+    updated_at: toOptionalString(row.updated_at),
+  };
+}
+
+export function mapTelegramPushRecordRow(row: LooseRow): TelegramPushRecord {
+  return {
+    id: toRequiredString(row.id),
+    project_name: toRequiredString(row.project_name) || DEFAULT_TELEGRAM_PUSH_PROJECT_NAME,
+    title: toRequiredString(row.title),
+    content: toRequiredString(row.content),
+    chat_id: toOptionalString(row.chat_id),
+    notification_key: toOptionalString(row.notification_key),
+    event_type: toOptionalString(row.event_type) as TelegramPushRecordEventType | null,
+    status: toRequiredString(row.status) as TelegramPushRecordStatus,
+    push_count: toOptionalNumber(row.push_count) ?? 0,
+    failure_reason: toOptionalString(row.failure_reason),
+    last_pushed_at: toOptionalString(row.last_pushed_at),
+    created_at: toRequiredString(row.created_at),
+    updated_at: toOptionalString(row.updated_at),
   };
 }

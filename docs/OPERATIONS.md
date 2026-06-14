@@ -87,7 +87,7 @@ Supabase 仍然额外提供：
 
 1. 保存 PostgreSQL 草稿连接与主/备角色
 2. 执行 PostgreSQL 连接测试，确认握手、`public schema` 权限与控制面表覆盖情况
-3. 执行“导入当前数据到目标后端”，把管理员、站点设置（含自定义图标）、检测配置、模板、分组、通知与历史记录复制到目标后端
+3. 执行“导入当前数据到目标后端”，把管理员、站点设置（含自定义图标）、检测配置、模板、Telegram 推送、通知与历史记录复制到目标后端
 4. 启用新的主备拓扑
 
 > 这套托管配置不会写进 `site_settings` 或公开页面，而是写入本地 SQLite bootstrap store（默认 `.sisyphus/local-data/storage-bootstrap.db`，可用 `STORAGE_BOOTSTRAP_SQLITE_PATH` 覆盖）。部署时必须确保该文件所在磁盘可持久化，并把该文件当作**明文 secret 存储**来保护。
@@ -98,8 +98,10 @@ Supabase 仍然额外提供：
 - `site_settings`
 - `check_configs`
 - `check_request_templates`
-- `group_info`
 - `system_notifications`
+- `telegram_push_config`
+- `telegram_alert_states`
+- `telegram_push_records`
 - `check_history`
 
 仍不提供：
@@ -112,7 +114,7 @@ Supabase 仍然额外提供：
 - v1 只支持 **单主单备** 或 **单主无备**：`Supabase primary / PostgreSQL backup`、`PostgreSQL primary / Supabase backup`，或把备用后端显式设为 `none`
 - 备用后端只作为受控切换目标，不做双写
 - PostgreSQL 连接串由后台持久化管理；Supabase 仍使用当前部署环境中的 `SUPABASE_URL` 与 `SUPABASE_SERVICE_ROLE_KEY`
-- 启用动作会更新 bootstrap authority，并在运行时重置 resolver、Dashboard、分组、历史相关内存缓存；若你的部署是多实例，必须确保所有实例共享同一个 bootstrap SQLite 文件或采用单实例滚动切换
+- 启用动作会更新 bootstrap authority，并在运行时重置 resolver、Dashboard、历史相关内存缓存；若你的部署是多实例，必须确保所有实例共享同一个 bootstrap SQLite 文件或采用单实例滚动切换
 - 当前托管导入会校验**当前数据（含历史记录）**的一致性，但仍然不是双写：如果导入后源端又产生了新历史，启用会被阻止并要求重新导入
 
 ### 3.4 SQLite
@@ -188,7 +190,7 @@ docker compose -f docker-compose.postgres.yml -f docker-compose.build.yml up -d 
 
 - 检测配置
 - 请求模板
-- 分组信息
+- Telegram 推送配置与记录
 - 系统通知
 - 站点设置
 - 站点浏览器图标（favicon / 侧栏图标，可直接上传替换）

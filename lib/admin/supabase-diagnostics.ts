@@ -66,7 +66,6 @@ interface RelationManifestItem {
 }
 
 interface RepairInspectionContext {
-  missingGroupNames: string[];
   orphanTemplateConfigIds: string[];
   missingSiteSettingsRow: boolean;
 }
@@ -98,13 +97,6 @@ const DB_SCHEMA = getSupabaseDbSchema();
 
 const PUBLIC_RELATIONS: RelationManifestItem[] = [
   {
-    id: "public-group-info",
-    label: "公开分组信息",
-    relation: "group_info",
-    columns: "id",
-    scope: "public",
-  },
-  {
     id: "public-system-notifications",
     label: "公开通知内容",
     relation: "system_notifications",
@@ -125,13 +117,6 @@ const ADMIN_RELATIONS: RelationManifestItem[] = [
     id: "admin-request-templates",
     label: "请求模板表",
     relation: "check_request_templates",
-    columns: "id",
-    scope: "admin",
-  },
-  {
-    id: "admin-group-info",
-    label: "分组信息表",
-    relation: "group_info",
     columns: "id",
     scope: "admin",
   },
@@ -161,6 +146,27 @@ const ADMIN_RELATIONS: RelationManifestItem[] = [
     label: "站点设置表",
     relation: "site_settings",
     columns: "singleton_key",
+    scope: "admin",
+  },
+  {
+    id: "admin-telegram-alert-states",
+    label: "Telegram 告警状态表",
+    relation: "telegram_alert_states",
+    columns: "notification_key",
+    scope: "admin",
+  },
+  {
+    id: "admin-telegram-push-config",
+    label: "Telegram 推送配置表",
+    relation: "telegram_push_config",
+    columns: "singleton_key",
+    scope: "admin",
+  },
+  {
+    id: "admin-telegram-push-records",
+    label: "Telegram 推送记录表",
+    relation: "telegram_push_records",
+    columns: "id, notification_key, event_type",
     scope: "admin",
   },
 ];
@@ -338,19 +344,11 @@ function createPublicDiagnosticClient() {
   });
 }
 
-function sortStrings(values: Iterable<string>): string[] {
-  return [...values].sort((left, right) => left.localeCompare(right, "zh-CN"));
-}
-
 async function inspectRepairContext(client: DiagnosticClient): Promise<RepairInspectionContext> {
-  const [configsResult, groupsResult, templatesResult, siteSettingsResult] = await Promise.all([
+  const [configsResult, templatesResult, siteSettingsResult] = await Promise.all([
     client
       .from("check_configs")
-      .select("id, type, template_id, group_name")
-      .limit(500),
-    client
-      .from("group_info")
-      .select("group_name")
+      .select("id, type, template_id")
       .limit(500),
     client
       .from("check_request_templates")
@@ -365,9 +363,6 @@ async function inspectRepairContext(client: DiagnosticClient): Promise<RepairIns
   if (configsResult.error) {
     throw new Error(`读取 check_configs 失败：${getErrorMessage(configsResult.error)}`);
   }
-  if (groupsResult.error) {
-    throw new Error(`读取 group_info 失败：${getErrorMessage(groupsResult.error)}`);
-  }
   if (templatesResult.error) {
     throw new Error(`读取 check_request_templates 失败：${getErrorMessage(templatesResult.error)}`);
   }
@@ -379,23 +374,11 @@ async function inspectRepairContext(client: DiagnosticClient): Promise<RepairIns
     id: string;
     type: string;
     template_id: string | null;
-    group_name: string | null;
   }>;
-  const existingGroups = new Set(
-    ((groupsResult.data ?? []) as Array<{group_name: string}>).map((item) => item.group_name.trim())
-  );
   const templateTypeMap = new Map(
     ((templatesResult.data ?? []) as Array<{id: string; type: string}>).map((item) => [item.id, item.type])
   );
   const siteSettingsRows = (siteSettingsResult.data ?? []) as Array<{singleton_key: string}>;
-
-  const missingGroupNames = sortStrings(
-    new Set(
-      configs
-        .map((item) => item.group_name?.trim() ?? "")
-        .filter((item) => item && !existingGroups.has(item))
-    )
-  );
 
   const orphanTemplateConfigIds = configs
     .filter((item) => {
@@ -409,7 +392,6 @@ async function inspectRepairContext(client: DiagnosticClient): Promise<RepairIns
     .map((item) => item.id);
 
   return {
-    missingGroupNames,
     orphanTemplateConfigIds,
     missingSiteSettingsRow: !siteSettingsRows.some(
       (item) => item.singleton_key === SITE_SETTINGS_SINGLETON_KEY
@@ -537,20 +519,6 @@ async function buildRepairChecks(client: DiagnosticClient | null): Promise<Supab
 
     return [
       {
-        id: "repair-missing-group-info",
-        label: "缺失的 group_info 记录",
-        status: context.missingGroupNames.length > 0 ? "repairable" : "healthy",
-        detail:
-          context.missingGroupNames.length > 0
-            ? `检测到 ${context.missingGroupNames.length} 个分组仅存在于 check_configs 中，还没有 group_info 记录。`
-            : "所有配置分组都已经有对应的 group_info 记录。",
-        hint:
-          context.missingGroupNames.length > 0
-            ? "自动修复会为这些分组补齐最小 group_info 行，后续可再手动补官网链接与标签。"
-            : undefined,
-        affectedCount: context.missingGroupNames.length,
-      },
-      {
         id: "repair-orphan-template-refs",
         label: "失效的模板引用",
         status: context.orphanTemplateConfigIds.length > 0 ? "repairable" : "healthy",
@@ -597,15 +565,6 @@ export async function runSupabaseAutoFix(): Promise<SupabaseAutoFixResult> {
   const context = await inspectRepairContext(client);
   const repairedItems: string[] = [];
 
-  if (context.missingGroupNames.length > 0) {
-    const payload = context.missingGroupNames.map((groupName) => ({group_name: groupName}));
-    const {error} = await client.from("group_info").insert(payload);
-    if (error) {
-      throw new Error(`补齐 group_info 失败：${getErrorMessage(error)}`);
-    }
-    repairedItems.push(`已补齐 ${context.missingGroupNames.length} 条 group_info 记录`);
-  }
-
   if (context.orphanTemplateConfigIds.length > 0) {
     const {error} = await client
       .from("check_configs")
@@ -630,6 +589,8 @@ export async function runSupabaseAutoFix(): Promise<SupabaseAutoFixResult> {
       footer_brand: DEFAULT_SITE_SETTINGS.footerBrand,
       admin_console_title: DEFAULT_SITE_SETTINGS.adminConsoleTitle,
       admin_console_description: DEFAULT_SITE_SETTINGS.adminConsoleDescription,
+      admin_entry_path: DEFAULT_SITE_SETTINGS.adminEntryPath,
+      telegram_notification_name: DEFAULT_SITE_SETTINGS.telegramNotificationName,
     });
     if (error) {
       throw new Error(`补齐 site_settings 失败：${getErrorMessage(error)}`);

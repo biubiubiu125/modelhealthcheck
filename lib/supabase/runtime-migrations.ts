@@ -5,6 +5,7 @@ import path from "node:path";
 
 import {Client} from "pg";
 
+import {resolvePostgresSsl} from "@/lib/storage/postgres-ssl";
 import {createAdminClient} from "@/lib/supabase/admin";
 import {resolveSupabaseDirectDbUrl} from "@/lib/supabase/config";
 import {getErrorMessage, logError} from "@/lib/utils";
@@ -65,6 +66,41 @@ const RUNTIME_MIGRATIONS: RuntimeMigrationDefinition[] = [
     probeColumns: "singleton_key",
     fileName: "20260317125500_add_site_settings.sql",
   },
+  {
+    id: "site-settings-admin-entry-path",
+    label: "后台入口路径字段",
+    relation: "site_settings",
+    probeColumns: "admin_entry_path",
+    fileName: "20260614000000_add_admin_entry_path.sql",
+  },
+  {
+    id: "site-settings-telegram-notification-name",
+    label: "Telegram 通知显示名称字段",
+    relation: "site_settings",
+    probeColumns: "telegram_notification_name",
+    fileName: "20260614001000_add_telegram_alert_states.sql",
+  },
+  {
+    id: "telegram-alert-states",
+    label: "Telegram 告警状态表",
+    relation: "telegram_alert_states",
+    probeColumns: "notification_key",
+    fileName: "20260614001000_add_telegram_alert_states.sql",
+  },
+  {
+    id: "telegram-push-config",
+    label: "Telegram 推送配置表",
+    relation: "telegram_push_config",
+    probeColumns: "singleton_key",
+    fileName: "20260614002000_add_telegram_push.sql",
+  },
+  {
+    id: "telegram-push-records",
+    label: "Telegram 推送记录表",
+    relation: "telegram_push_records",
+    probeColumns: "id, notification_key, event_type",
+    fileName: "20260614002000_add_telegram_push.sql",
+  },
 ];
 
 const PG_RETRY_DELAYS_MS = [0, 1200, 2500];
@@ -94,8 +130,10 @@ function getRuntimeMigrationErrorMessage(error: unknown): string {
   return getErrorMessage(error);
 }
 
-function getIdsKey(ids?: string[]): string {
-  return ids && ids.length > 0 ? [...ids].sort().join(",") : "all";
+function getIdsKey(ids?: string[], input?: {allowDraft?: boolean}): string {
+  const scope = input?.allowDraft ? "draft" : "active";
+  const idsKey = ids && ids.length > 0 ? [...ids].sort().join(",") : "all";
+  return `${scope}:${idsKey}`;
 }
 
 function getMigrationDefinitions(ids?: string[]): RuntimeMigrationDefinition[] {
@@ -107,8 +145,12 @@ function getMigrationDefinitions(ids?: string[]): RuntimeMigrationDefinition[] {
   return RUNTIME_MIGRATIONS.filter((item) => wanted.has(item.id));
 }
 
-function getMigrationConnectionState(): MigrationConnectionState {
-  const managedOrEnvSupabaseDb = resolveSupabaseDirectDbUrl();
+function getUniqueMigrationFiles(checks: RuntimeMigrationCheck[]): string[] {
+  return Array.from(new Set(checks.map((check) => check.fileName)));
+}
+
+function getMigrationConnectionState(input?: {allowDraft?: boolean}): MigrationConnectionState {
+  const managedOrEnvSupabaseDb = resolveSupabaseDirectDbUrl({allowDraft: input?.allowDraft});
   if (managedOrEnvSupabaseDb) {
     return managedOrEnvSupabaseDb;
   }
@@ -173,12 +215,15 @@ async function runWithPgRetry<T>(operation: () => Promise<T>): Promise<T> {
   throw lastError instanceof Error ? lastError : new Error(getRuntimeMigrationErrorMessage(lastError));
 }
 
-async function probeRelation(definition: RuntimeMigrationDefinition): Promise<{
+async function probeRelation(
+  definition: RuntimeMigrationDefinition,
+  input?: {allowDraft?: boolean}
+): Promise<{
   exists: boolean;
   blockedReason: string | null;
 }> {
   try {
-    const supabase = createAdminClient();
+    const supabase = createAdminClient({allowDraft: input?.allowDraft});
     const {error} = await supabase
       .from(definition.relation)
       .select(definition.probeColumns)
@@ -272,7 +317,8 @@ async function probeRelationsViaPg(
 }
 
 async function waitForRestRelations(
-  definitions: RuntimeMigrationDefinition[]
+  definitions: RuntimeMigrationDefinition[],
+  input?: {allowDraft?: boolean}
 ): Promise<Map<string, RelationProbeResult>> {
   const latest = new Map<string, RelationProbeResult>();
 
@@ -284,7 +330,7 @@ async function waitForRestRelations(
     let allHealthy = true;
 
     for (const definition of definitions) {
-      const probe = await probeRelation(definition);
+      const probe = await probeRelation(definition, {allowDraft: input?.allowDraft});
       latest.set(definition.id, probe);
       if (!probe.exists) {
         allHealthy = false;
@@ -307,8 +353,11 @@ export function invalidateRuntimeMigrationCache(): void {
   latestInspectionCache = null;
 }
 
-export async function inspectRuntimeMigrations(ids?: string[]): Promise<RuntimeMigrationInspection> {
-  const idsKey = getIdsKey(ids);
+export async function inspectRuntimeMigrations(
+  ids?: string[],
+  input?: {allowDraft?: boolean}
+): Promise<RuntimeMigrationInspection> {
+  const idsKey = getIdsKey(ids, input);
   if (
     latestInspectionCache &&
     latestInspectionCache.idsKey === idsKey &&
@@ -318,7 +367,7 @@ export async function inspectRuntimeMigrations(ids?: string[]): Promise<RuntimeM
   }
 
   const definitions = getMigrationDefinitions(ids);
-  const connectionState = getMigrationConnectionState();
+  const connectionState = getMigrationConnectionState({allowDraft: input?.allowDraft});
   const pgProbeResults = connectionState.connectionString
     ? await probeRelationsViaPg(definitions, connectionState.connectionString)
     : null;
@@ -328,12 +377,12 @@ export async function inspectRuntimeMigrations(ids?: string[]): Promise<RuntimeM
       const probe =
         pgProbe && pgProbe.blockedReason
           ? (() => pgProbe)()
-          : pgProbe ?? (await probeRelation(definition));
+          : pgProbe ?? (await probeRelation(definition, {allowDraft: input?.allowDraft}));
 
       const finalProbe =
         pgProbe && pgProbe.blockedReason
           ? await (async () => {
-              const restProbe = await probeRelation(definition);
+              const restProbe = await probeRelation(definition, {allowDraft: input?.allowDraft});
               if (restProbe.exists || !restProbe.blockedReason) {
                 return restProbe;
               }
@@ -402,12 +451,11 @@ export async function inspectRuntimeMigrations(ids?: string[]): Promise<RuntimeM
 }
 
 function buildPgClient(connectionString: string): Client {
-  const url = new URL(connectionString);
-  const isLocalHost = ["localhost", "127.0.0.1"].includes(url.hostname);
+  const ssl = resolvePostgresSsl(connectionString);
 
   return new Client({
     connectionString,
-    ssl: isLocalHost ? false : {rejectUnauthorized: false},
+    ssl: ssl.ssl,
   });
 }
 
@@ -419,8 +467,9 @@ async function readMigrationSql(fileName: string): Promise<string> {
 export async function ensureRuntimeMigrations(input?: {
   ids?: string[];
   force?: boolean;
+  allowDraft?: boolean;
 }): Promise<RuntimeMigrationExecutionResult> {
-  const idsKey = getIdsKey(input?.ids);
+  const idsKey = getIdsKey(input?.ids, {allowDraft: input?.allowDraft});
 
   if (!input?.force) {
     const inFlightPromise = inFlightEnsurePromises.get(idsKey);
@@ -430,7 +479,9 @@ export async function ensureRuntimeMigrations(input?: {
   }
 
   const runner = async (): Promise<RuntimeMigrationExecutionResult> => {
-    const inspection = await inspectRuntimeMigrations(input?.ids);
+    const inspection = await inspectRuntimeMigrations(input?.ids, {
+      allowDraft: input?.allowDraft,
+    });
     const pendingChecks = inspection.checks.filter((item) => item.status === "pending");
     const blockedCheck = inspection.checks.find((item) => item.status === "blocked");
     const pendingDefinitions = getMigrationDefinitions(pendingChecks.map((item) => item.id));
@@ -453,7 +504,7 @@ export async function ensureRuntimeMigrations(input?: {
       };
     }
 
-    const connectionState = getMigrationConnectionState();
+    const connectionState = getMigrationConnectionState({allowDraft: input?.allowDraft});
     if (!connectionState.connectionString) {
       return {
         appliedCount: 0,
@@ -474,17 +525,17 @@ export async function ensureRuntimeMigrations(input?: {
       try {
         await client.connect();
 
-        for (const check of pendingChecks) {
-          const sql = await readMigrationSql(check.fileName);
+        for (const fileName of getUniqueMigrationFiles(pendingChecks)) {
+          const sql = await readMigrationSql(fileName);
 
           try {
             await client.query("BEGIN");
             await client.query(sql);
             await client.query("COMMIT");
-            appliedItems.push(`已执行 ${check.fileName}`);
+            appliedItems.push(`已执行 ${fileName}`);
           } catch (error) {
             await client.query("ROLLBACK");
-            throw new Error(`执行 ${check.fileName} 失败：${getRuntimeMigrationErrorMessage(error)}`);
+            throw new Error(`执行 ${fileName} 失败：${getRuntimeMigrationErrorMessage(error)}`);
           }
         }
 
@@ -496,7 +547,9 @@ export async function ensureRuntimeMigrations(input?: {
 
     invalidateRuntimeMigrationCache();
 
-    const restProbeResults = await waitForRestRelations(pendingDefinitions);
+    const restProbeResults = await waitForRestRelations(pendingDefinitions, {
+      allowDraft: input?.allowDraft,
+    });
     const remainingPending = pendingDefinitions.filter((definition) => {
       const probe = restProbeResults.get(definition.id);
       return !probe?.exists;
@@ -513,7 +566,7 @@ export async function ensureRuntimeMigrations(input?: {
       );
     }
 
-    await inspectRuntimeMigrations(input?.ids);
+    await inspectRuntimeMigrations(input?.ids, {allowDraft: input?.allowDraft});
 
     return {
       appliedCount: appliedItems.length,

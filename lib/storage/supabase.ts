@@ -3,18 +3,22 @@ import "server-only";
 import type {PostgrestError} from "@supabase/supabase-js";
 
 import {createAdminClient} from "@/lib/supabase/admin";
+import {ensureRuntimeMigrations} from "@/lib/supabase/runtime-migrations";
 import type {AvailabilityStats} from "@/lib/types/database";
 import {getErrorMessage} from "@/lib/utils";
 
 import type {
   CheckConfigMutationInput,
   ControlPlaneStorage,
-  GroupMutationInput,
   NotificationMutationInput,
   RequestTemplateMutationInput,
   RuntimeHistoryQueryOptions,
   SiteSettingsMutationInput,
   StorageCapabilities,
+  TelegramAlertStateMutationInput,
+  TelegramPushConfigMutationInput,
+  TelegramPushRecordMutationInput,
+  TelegramPushRecordStatusUpdateInput,
 } from "./types";
 import {
   createStorageId,
@@ -22,11 +26,13 @@ import {
   mapAdminUserRecord,
   mapAvailabilityStatsRow,
   mapCheckConfigRow,
-  mapGroupInfoRow,
   mapHistorySnapshotRow,
   mapNotificationRow,
   mapRequestTemplateRow,
   mapSiteSettingsRow,
+  mapTelegramAlertStateRow,
+  mapTelegramPushConfigRow,
+  mapTelegramPushRecordRow,
 } from "./shared";
 
 const capabilities: StorageCapabilities = {
@@ -35,7 +41,6 @@ const capabilities: StorageCapabilities = {
   siteSettings: true,
   controlPlaneCrud: true,
   requestTemplates: true,
-  groups: true,
   notifications: true,
   historySnapshots: true,
   availabilityStats: true,
@@ -50,6 +55,13 @@ const RPC_RECENT_HISTORY = "get_recent_check_history";
 const RPC_PRUNE_HISTORY = "prune_check_history";
 const LEGACY_TEMPLATES_WARNING =
   "请求模板表尚未初始化，当前回退到内置默认模板。请补齐最新 Supabase schema / migration。";
+const TELEGRAM_PUSH_RECORD_COLUMNS =
+  "id, project_name, title, content, chat_id, notification_key, event_type, status, push_count, failure_reason, last_pushed_at, created_at, updated_at";
+const LEGACY_TELEGRAM_PUSH_RECORD_COLUMNS =
+  "id, project_name, title, content, chat_id, status, push_count, failure_reason, last_pushed_at, created_at, updated_at";
+const TELEGRAM_ALERT_STATE_COLUMNS =
+  "notification_key, config_id, model, state, failure_count, success_count, last_status, last_message, failure_started_at, last_failure_at, last_success_at, last_notified_at, created_at, updated_at";
+const SUPABASE_PAGE_SIZE = 1000;
 
 interface CheckConfigSelectProfile {
   columns: string;
@@ -189,6 +201,7 @@ function chunkRows<T>(rows: T[], size: number): T[][] {
 export function createSupabaseControlPlaneStorage(input?: {allowDraft?: boolean}): ControlPlaneStorage {
   const allowDraft = input?.allowDraft;
   let readyPromise: Promise<void> | null = null;
+  let telegramStorageMigrationPromise: Promise<void> | null = null;
   let requestTemplatesRelationAvailable: boolean | null = null;
   let availabilityStatsViewAvailable: boolean | null = null;
   let checkConfigSelectProfileIndex = 0;
@@ -250,12 +263,46 @@ export function createSupabaseControlPlaneStorage(input?: {allowDraft?: boolean}
     return message.includes(RPC_RECENT_HISTORY) || message.includes(RPC_PRUNE_HISTORY);
   }
 
-  function isMissingSiteIconColumnError(error: PostgrestError | null): boolean {
+  function isMissingSiteSettingsColumnError(error: PostgrestError | null): boolean {
     if (!error) {
       return false;
     }
 
-    return getErrorMessage(error).includes("site_icon_url");
+    const message = getErrorMessage(error);
+    return (
+      message.includes("site_icon_url") ||
+      message.includes("admin_entry_path") ||
+      message.includes("telegram_notification_name")
+    );
+  }
+
+  async function ensureTelegramStorageReady(): Promise<void> {
+    if (!telegramStorageMigrationPromise) {
+      telegramStorageMigrationPromise = ensureRuntimeMigrations({
+        ids: ["telegram-alert-states", "telegram-push-config", "telegram-push-records"],
+        allowDraft,
+      })
+        .then((result) => {
+          if (result.blockedReason) {
+            throw new Error(result.blockedReason);
+          }
+        })
+        .catch((error) => {
+          telegramStorageMigrationPromise = null;
+          throw error;
+        });
+    }
+
+    return telegramStorageMigrationPromise;
+  }
+
+  function isMissingTelegramPushRecordColumnError(error: PostgrestError | null): boolean {
+    if (!error) {
+      return false;
+    }
+
+    const message = getErrorMessage(error);
+    return message.includes("notification_key") || message.includes("event_type");
   }
 
   async function selectCheckConfigList(input?: {enabledOnly?: boolean}) {
@@ -724,13 +771,13 @@ export function createSupabaseControlPlaneStorage(input?: {allowDraft?: boolean}
         const {data, error} = await client
           .from("site_settings")
           .select(
-            "singleton_key, site_name, site_description, site_icon_url, hero_badge, hero_title_primary, hero_title_secondary, hero_description, footer_brand, admin_console_title, admin_console_description, created_at, updated_at"
+            "singleton_key, site_name, site_description, site_icon_url, hero_badge, hero_title_primary, hero_title_secondary, hero_description, footer_brand, admin_console_title, admin_console_description, admin_entry_path, telegram_notification_name, created_at, updated_at"
           )
           .eq("singleton_key", singletonKey)
           .maybeSingle();
 
         if (error) {
-          if (isMissingSiteIconColumnError(error)) {
+          if (isMissingSiteSettingsColumnError(error)) {
             const fallback = await client
               .from("site_settings")
               .select(
@@ -917,85 +964,6 @@ export function createSupabaseControlPlaneStorage(input?: {allowDraft?: boolean}
         }
       },
     },
-    groups: {
-      async list() {
-        await ensureReady();
-        const client = createAdminClient({allowDraft});
-        const {data, error} = await client
-          .from("group_info")
-          .select("id, group_name, website_url, tags, created_at, updated_at")
-          .order("group_name", {ascending: true});
-
-        if (error) {
-          wrapStorageError("读取分组信息", error);
-        }
-
-        return ((data as Array<Record<string, unknown>> | null) ?? []).map(mapGroupInfoRow);
-      },
-      async getByName(groupName) {
-        await ensureReady();
-        const client = createAdminClient({allowDraft});
-        const {data, error} = await client
-          .from("group_info")
-          .select("id, group_name, website_url, tags, created_at, updated_at")
-          .eq("group_name", groupName)
-          .maybeSingle();
-
-        if (error) {
-          wrapStorageError("读取分组信息", error);
-        }
-
-        return data ? mapGroupInfoRow(data as Record<string, unknown>) : null;
-      },
-      async upsert(input: GroupMutationInput) {
-        await ensureReady();
-        const client = createAdminClient({allowDraft});
-        const payloadId = input.id ?? createStorageId();
-        const payload = {
-          id: payloadId,
-          group_name: input.group_name,
-          website_url: input.website_url ?? null,
-          tags: input.tags ?? null,
-        };
-
-        let error: unknown = null;
-
-        if (input.id) {
-          const updateResult = await client
-            .from("group_info")
-            .update({
-              group_name: input.group_name,
-              website_url: input.website_url ?? null,
-              tags: input.tags ?? null,
-            })
-            .eq("id", input.id)
-            .select("id");
-
-          if (updateResult.error) {
-            error = updateResult.error;
-          } else if ((updateResult.data ?? []).length === 0) {
-            const insertResult = await client.from("group_info").insert(payload);
-            error = insertResult.error;
-          }
-        } else {
-          const insertResult = await client.from("group_info").insert(payload);
-          error = insertResult.error;
-        }
-
-        if (error) {
-          wrapStorageError("保存分组信息", error);
-        }
-      },
-      async delete(id) {
-        await ensureReady();
-        const client = createAdminClient({allowDraft});
-        const {error} = await client.from("group_info").delete().eq("id", id);
-
-        if (error) {
-          wrapStorageError("删除分组信息", error);
-        }
-      },
-    },
     notifications: {
       async list() {
         await ensureReady();
@@ -1072,6 +1040,319 @@ export function createSupabaseControlPlaneStorage(input?: {allowDraft?: boolean}
 
         if (error) {
           wrapStorageError("删除系统通知", error);
+        }
+      },
+    },
+    telegramAlertStates: {
+      async list(input) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const limit = input?.limit === null ? null : Math.min(Math.max(input?.limit ?? 100, 1), 500);
+        const firstTo = limit === null ? SUPABASE_PAGE_SIZE - 1 : limit - 1;
+
+        const {data, error} = await client
+          .from("telegram_alert_states")
+          .select(TELEGRAM_ALERT_STATE_COLUMNS)
+          .order("updated_at", {ascending: false})
+          .range(0, firstTo);
+
+        if (error) {
+          wrapStorageError("读取 Telegram 告警状态列表", error);
+        }
+
+        const rows = [
+          ...(((data as unknown as Array<Record<string, unknown>> | null) ?? [])),
+        ];
+
+        if (limit === null) {
+          let currentPageRows = rows;
+          let offset = currentPageRows.length;
+          while (currentPageRows.length === SUPABASE_PAGE_SIZE) {
+            const page = await client
+              .from("telegram_alert_states")
+              .select(TELEGRAM_ALERT_STATE_COLUMNS)
+              .order("updated_at", {ascending: false})
+              .range(offset, offset + SUPABASE_PAGE_SIZE - 1);
+
+            if (page.error) {
+              wrapStorageError("读取 Telegram 告警状态列表", page.error);
+            }
+
+            currentPageRows =
+              ((page.data as unknown as Array<Record<string, unknown>> | null) ?? []);
+            rows.push(...currentPageRows);
+            offset += currentPageRows.length;
+          }
+        }
+
+        return rows.map(mapTelegramAlertStateRow);
+      },
+      async get(notificationKey) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const {data, error} = await client
+          .from("telegram_alert_states")
+          .select(TELEGRAM_ALERT_STATE_COLUMNS)
+          .eq("notification_key", notificationKey)
+          .maybeSingle();
+
+        if (error) {
+          wrapStorageError("读取 Telegram 告警状态", error);
+        }
+
+        return data ? mapTelegramAlertStateRow(data as Record<string, unknown>) : null;
+      },
+      async upsert(input: TelegramAlertStateMutationInput) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const payload = {
+          notification_key: input.notification_key,
+          config_id: input.config_id,
+          model: input.model,
+          state: input.state,
+          failure_count: input.failure_count,
+          success_count: input.success_count,
+          last_status: input.last_status ?? null,
+          last_message: input.last_message ?? null,
+          failure_started_at: input.failure_started_at ?? null,
+          last_failure_at: input.last_failure_at ?? null,
+          last_success_at: input.last_success_at ?? null,
+          last_notified_at: input.last_notified_at ?? null,
+        };
+
+        const {data, error} = await client
+          .from("telegram_alert_states")
+          .upsert(payload, {onConflict: "notification_key"})
+          .select(TELEGRAM_ALERT_STATE_COLUMNS)
+          .single();
+
+        if (error) {
+          wrapStorageError("保存 Telegram 告警状态", error);
+        }
+
+        return mapTelegramAlertStateRow(data as Record<string, unknown>);
+      },
+      async delete(notificationKey) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const {error} = await client
+          .from("telegram_alert_states")
+          .delete()
+          .eq("notification_key", notificationKey);
+
+        if (error) {
+          wrapStorageError("删除 Telegram 告警状态", error);
+        }
+      },
+    },
+    telegramPushConfig: {
+      async getSingleton(singletonKey) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const {data, error} = await client
+          .from("telegram_push_config")
+          .select(
+            "singleton_key, project_name, bot_token, chat_id, auto_push_enabled, created_at, updated_at"
+          )
+          .eq("singleton_key", singletonKey)
+          .maybeSingle();
+
+        if (error) {
+          wrapStorageError("读取 Telegram 推送配置", error);
+        }
+
+        return data ? mapTelegramPushConfigRow(data as Record<string, unknown>) : null;
+      },
+      async upsert(input: TelegramPushConfigMutationInput) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const {data, error} = await client
+          .from("telegram_push_config")
+          .upsert(input, {onConflict: "singleton_key"})
+          .select(
+            "singleton_key, project_name, bot_token, chat_id, auto_push_enabled, created_at, updated_at"
+          )
+          .single();
+
+        if (error) {
+          wrapStorageError("保存 Telegram 推送配置", error);
+        }
+
+        return mapTelegramPushConfigRow(data as Record<string, unknown>);
+      },
+    },
+    telegramPushRecords: {
+      async list(input) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const limit = input?.limit === null ? null : Math.min(Math.max(input?.limit ?? 100, 1), 500);
+        const fetchPage = async (from: number, to: number, columns: string) =>
+          client
+            .from("telegram_push_records")
+            .select(columns)
+            .order("created_at", {ascending: false})
+            .range(from, to);
+
+        const firstTo = limit === null ? SUPABASE_PAGE_SIZE - 1 : limit - 1;
+        let {data, error} = await fetchPage(0, firstTo, TELEGRAM_PUSH_RECORD_COLUMNS);
+        let columns = TELEGRAM_PUSH_RECORD_COLUMNS;
+        let currentPageRows = ((data as unknown as Array<Record<string, unknown>> | null) ?? []);
+
+        if (isMissingTelegramPushRecordColumnError(error)) {
+          const legacyResult = await fetchPage(0, firstTo, LEGACY_TELEGRAM_PUSH_RECORD_COLUMNS);
+          data = legacyResult.data;
+          error = legacyResult.error;
+          columns = LEGACY_TELEGRAM_PUSH_RECORD_COLUMNS;
+          currentPageRows = ((data as unknown as Array<Record<string, unknown>> | null) ?? []);
+        }
+
+        if (error) {
+          wrapStorageError("读取 Telegram 推送记录", error);
+        }
+
+        const rows = [...currentPageRows];
+
+        if (limit === null) {
+          let offset = rows.length;
+          while (currentPageRows.length === SUPABASE_PAGE_SIZE) {
+            const page = await fetchPage(offset, offset + SUPABASE_PAGE_SIZE - 1, columns);
+            if (page.error) {
+              wrapStorageError("读取 Telegram 推送记录", page.error);
+            }
+            currentPageRows = ((page.data as unknown as Array<Record<string, unknown>> | null) ?? []);
+            rows.push(...currentPageRows);
+            offset += currentPageRows.length;
+          }
+        }
+
+        return rows.map(mapTelegramPushRecordRow);
+      },
+      async getById(id) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const currentResult = await client
+          .from("telegram_push_records")
+          .select(TELEGRAM_PUSH_RECORD_COLUMNS)
+          .eq("id", id)
+          .maybeSingle();
+        let data: Record<string, unknown> | null =
+          (currentResult.data as unknown as Record<string, unknown> | null) ?? null;
+        let error = currentResult.error;
+
+        if (isMissingTelegramPushRecordColumnError(error)) {
+          const legacyResult = await client
+            .from("telegram_push_records")
+            .select(LEGACY_TELEGRAM_PUSH_RECORD_COLUMNS)
+            .eq("id", id)
+            .maybeSingle();
+          data = (legacyResult.data as unknown as Record<string, unknown> | null) ?? null;
+          error = legacyResult.error;
+        }
+
+        if (error) {
+          wrapStorageError("读取 Telegram 推送记录详情", error);
+        }
+
+        return data ? mapTelegramPushRecordRow(data) : null;
+      },
+      async findLatestByContext(input) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const isTestEvent = input.eventType === "test";
+        let query = client
+          .from("telegram_push_records")
+          .select(TELEGRAM_PUSH_RECORD_COLUMNS)
+          .eq("event_type", input.eventType)
+          .order("created_at", {ascending: false})
+          .limit(1);
+
+        if (!isTestEvent) {
+          query = query.eq("notification_key", input.notificationKey ?? "");
+        }
+
+        const {data, error} = await query.maybeSingle();
+        if (isMissingTelegramPushRecordColumnError(error)) {
+          return null;
+        }
+        if (error) {
+          wrapStorageError("读取最新 Telegram 推送记录", error);
+        }
+
+        return data ? mapTelegramPushRecordRow(data as Record<string, unknown>) : null;
+      },
+      async create(input: TelegramPushRecordMutationInput) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const payload = {
+          id: input.id ?? createStorageId(),
+          project_name: input.project_name,
+          title: input.title,
+          content: input.content,
+          chat_id: input.chat_id ?? null,
+          notification_key: input.notification_key ?? null,
+          event_type: input.event_type ?? null,
+          status: input.status ?? "pending",
+          push_count: input.push_count ?? 0,
+          failure_reason: input.failure_reason ?? null,
+          last_pushed_at: input.last_pushed_at ?? null,
+        };
+        const {data, error} = await client
+          .from("telegram_push_records")
+          .upsert(payload, {onConflict: "id"})
+          .select(TELEGRAM_PUSH_RECORD_COLUMNS)
+          .single();
+
+        if (error) {
+          wrapStorageError("创建 Telegram 推送记录", error);
+        }
+
+        return mapTelegramPushRecordRow(data as Record<string, unknown>);
+      },
+      async updateStatus(input: TelegramPushRecordStatusUpdateInput) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const payload: Record<string, unknown> = {
+          status: input.status,
+          push_count: input.push_count,
+          failure_reason: input.failure_reason ?? null,
+          last_pushed_at: input.last_pushed_at ?? null,
+        };
+        if (input.chat_id !== undefined) {
+          payload.chat_id = input.chat_id;
+        }
+
+        const {data, error} = await client
+          .from("telegram_push_records")
+          .update(payload)
+          .eq("id", input.id)
+          .select(TELEGRAM_PUSH_RECORD_COLUMNS)
+          .single();
+
+        if (error) {
+          wrapStorageError("更新 Telegram 推送记录", error);
+        }
+
+        return mapTelegramPushRecordRow(data as Record<string, unknown>);
+      },
+      async delete(id) {
+        await ensureReady();
+        await ensureTelegramStorageReady();
+        const client = createAdminClient({allowDraft});
+        const {error} = await client.from("telegram_push_records").delete().eq("id", id);
+
+        if (error) {
+          wrapStorageError("删除 Telegram 推送记录", error);
         }
       },
     },

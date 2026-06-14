@@ -68,18 +68,6 @@ export interface AvailabilityStats {
 }
 
 /**
- * group_info 表的行类型
- */
-export interface GroupInfoRow {
-  id: string;
-  group_name: string;
-  website_url?: string | null;
-  tags?: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
-/**
  * system_notifications 表的行类型
  */
 export interface SystemNotificationRow {
@@ -102,6 +90,8 @@ export interface SiteSettingsRow {
   footer_brand: string;
   admin_console_title: string;
   admin_console_description: string;
+  admin_entry_path: string;
+  telegram_notification_name: string;
   created_at?: string;
   updated_at?: string;
 }

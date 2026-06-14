@@ -11,16 +11,23 @@ import {
 import {deleteTemplateAction, upsertTemplateAction} from "@/app/admin/actions";
 import {requireAdminSession} from "@/lib/admin/auth";
 import {ADMIN_PROVIDER_TYPES, loadAdminManagementData} from "@/lib/admin/data";
+import {getAdminPath} from "@/lib/admin/paths";
 import {formatAdminTimestamp, formatJson, getAdminFeedback} from "@/lib/admin/view";
 
 export const dynamic = "force-dynamic";
 
 interface AdminTemplatesPageProps {
   searchParams: Promise<Record<string, string | string[] | undefined>>;
+  adminBasePath?: string;
 }
 
-export default async function AdminTemplatesPage({searchParams}: AdminTemplatesPageProps) {
-  await requireAdminSession();
+export default async function AdminTemplatesPage({
+  searchParams,
+  adminBasePath = "/admin",
+}: AdminTemplatesPageProps) {
+  const templatesPath = getAdminPath(adminBasePath, "templates");
+
+  await requireAdminSession(getAdminPath(adminBasePath, "login"));
   const [{templates}, params] = await Promise.all([loadAdminManagementData(), searchParams]);
   const feedback = getAdminFeedback(params);
 
@@ -36,7 +43,7 @@ export default async function AdminTemplatesPage({searchParams}: AdminTemplatesP
       <div className="grid gap-6 xl:grid-cols-[0.9fr_1.4fr]">
         <AdminPanel title="新增模板" description="创建一个可复用模板。">
           <form action={upsertTemplateAction} className="space-y-4">
-            <input type="hidden" name="returnTo" value="/admin/templates" />
+            <input type="hidden" name="returnTo" value={templatesPath} />
 
             <AdminField label="模板名称">
               <AdminInput name="name" placeholder="默认请求头" required />
@@ -93,7 +100,7 @@ export default async function AdminTemplatesPage({searchParams}: AdminTemplatesP
 
                     <form action={deleteTemplateAction}>
                       <input type="hidden" name="id" value={template.id} />
-                      <input type="hidden" name="returnTo" value="/admin/templates" />
+                      <input type="hidden" name="returnTo" value={templatesPath} />
                       <Button
                         type="submit"
                         variant="outline"
@@ -106,7 +113,7 @@ export default async function AdminTemplatesPage({searchParams}: AdminTemplatesP
 
                   <form action={upsertTemplateAction} className="space-y-4">
                     <input type="hidden" name="id" value={template.id} />
-                    <input type="hidden" name="returnTo" value="/admin/templates" />
+                    <input type="hidden" name="returnTo" value={templatesPath} />
 
                     <div className="grid gap-4 md:grid-cols-2">
                       <AdminField label="模板名称">
